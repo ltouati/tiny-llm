@@ -1,0 +1,8 @@
+.venv/
+fineweb_edu.bin
+tokenizer.json
+*.safetensors
+*.nsys-rep
+*.sqlite
+*.jsonl
+target/
