@@ -1,5 +1,7 @@
 # TinyLLM 🧠🦀
 
+![TinyLLM Architecture](tiny_llm_architecture.png)
+
 A minimalist, high-performance GPT-2 style language model built entirely in Rust using the `candle_core` framework. TinyLLM is designed for educational exploration, rapid prototyping, and executing fused GPU kernels natively without Python runtime overhead.
 
 ## Architecture Highlights
