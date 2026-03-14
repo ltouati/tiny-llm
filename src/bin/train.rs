@@ -68,8 +68,30 @@ fn main() -> Result<()> {
         // but `WillNeed` and `Random` massively increases Random Read throughput!
     }
 
-    let dataset: &[u32] = bytemuck::cast_slice(&mmap);
-    println!("Loaded {} tokens!", dataset.len());
+    let mut dataset_percentage = 100.0;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--dataset-percentage" {
+            if let Some(val) = args.next() {
+                dataset_percentage = val
+                    .parse::<f64>()
+                    .expect("Failed to parse dataset percentage");
+            }
+        }
+    }
+
+    let full_dataset: &[u32] = bytemuck::cast_slice(&mmap);
+    let dataset = if dataset_percentage < 100.0 {
+        let new_len = ((full_dataset.len() as f64) * (dataset_percentage / 100.0)) as usize;
+        println!(
+            "Using {}% of the dataset! ({} tokens)",
+            dataset_percentage, new_len
+        );
+        &full_dataset[..new_len]
+    } else {
+        println!("Loaded {} tokens!", full_dataset.len());
+        full_dataset
+    };
 
     // Calculate optimal batch size automatically based on VRAM
     // TinyLLM consumes approximately 1024MB per batch size of 1 for SEQ_LEN=1024
@@ -145,6 +167,7 @@ fn main() -> Result<()> {
 
     // Warmup is always exactly 10% of the total steps
     let warmup_steps: usize = (max_steps as f64 * 0.1) as usize;
+    let min_lr = max_lr * 0.1; // Set min_lr to 10% of max_lr
 
     let mut x_data_buf = vec![0u32; batch_size * config.seq_len];
     let mut y_data_buf = vec![0u32; batch_size * config.seq_len];
@@ -152,10 +175,15 @@ fn main() -> Result<()> {
     for step in start_epoch..=max_steps {
         // 1. Calculate and update learning rate
         let lr = if step < warmup_steps {
+            // Linear warmup
             max_lr * ((step + 1) as f64 / warmup_steps as f64)
+        } else if step > max_steps {
+            min_lr
         } else {
-            // Inverse square root decay
-            max_lr * (warmup_steps as f64).sqrt() / (step as f64).sqrt()
+            // Cosine decay
+            let decay_ratio = (step - warmup_steps) as f64 / (max_steps - warmup_steps) as f64;
+            let coeff = 0.5 * (1.0 + (std::f64::consts::PI * decay_ratio).cos());
+            min_lr + coeff * (max_lr - min_lr)
         };
         opt.set_lr(lr);
 

@@ -26,8 +26,12 @@ Ensure you have the Rust toolchain and the NVIDIA CUDA Toolkit (v12+) installed.
 ### 1. Training the Model
 The training loop automatically handles dataset acquisition (FineWeb), tokenization, and checkpoint resumption. It serializes weights incrementally explicitly to the `.safetensors` format.
 
+**New Training Features:**
+*   **Learning Rate Scheduler**: Incorporates a Cosine Decay schedule with a 10% linear warmup phase and a 10% minimum learning rate floor for optimal convergence.
+*   **Dataset Slicing**: Dynamically scale your training data without modifying the binary by passing the `--dataset-percentage` argument (e.g., `--dataset-percentage 10`).
+
 ```bash
-cargo run --release --bin train
+cargo run --release --bin train -- --dataset-percentage 100
 ```
 
 ### 2. Text Generation
