@@ -1,3 +1,0 @@
-datasets
-transformers
-numpy

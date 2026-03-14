@@ -1,4 +1,5 @@
 .venv/
+.lm_eval_env/
 fineweb_edu.bin
 tokenizer.json
 *.safetensors
@@ -6,3 +7,6 @@ tokenizer.json
 *.sqlite
 *.jsonl
 target/
+*.log
+.env
+*.pkl

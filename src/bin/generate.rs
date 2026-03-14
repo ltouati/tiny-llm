@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use tokenizers::Tokenizer;
 
 // Import our architecture from the lib.rs file
-use tiny_llm::TinyLLM;
+use tiny_llm::{Config, TinyLLM};
 
 fn main() -> Result<()> {
     let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
@@ -47,7 +47,9 @@ fn main() -> Result<()> {
     println!("Loading weights from {}...", checkpoint_file);
     let vb =
         unsafe { VarBuilder::from_mmaped_safetensors(&[checkpoint_file], DType::BF16, &device)? };
-    let model = TinyLLM::new(vb)?;
+
+    let config = Config::load_from_file("config.json").unwrap_or_default();
+    let model = TinyLLM::new(config, vb)?;
 
     let args: Vec<String> = std::env::args().collect();
     let prompt = if args.len() > 1 {
@@ -67,9 +69,12 @@ fn main() -> Result<()> {
 
     let max_tokens_to_generate = 100;
 
+    let mut start_pos = 0;
+    let mut next_tokens = tokens.clone();
+
     for _ in 0..max_tokens_to_generate {
-        let input = Tensor::from_vec(tokens.clone(), (1, tokens.len()), &device)?;
-        let logits = model.forward(&input)?;
+        let input = Tensor::from_vec(next_tokens.clone(), (1, next_tokens.len()), &device)?;
+        let logits = model.forward(&input, start_pos)?;
 
         let (_, seq_len, _) = logits.dims3()?;
         let last_token_logits = logits
@@ -95,6 +100,9 @@ fn main() -> Result<()> {
         }
 
         tokens.push(next_token_id);
+
+        start_pos += next_tokens.len();
+        next_tokens = vec![next_token_id];
 
         let new_word = tokenizer
             .decode(&[next_token_id], true)

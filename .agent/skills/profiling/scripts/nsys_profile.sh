@@ -25,6 +25,6 @@ nsys profile \
     -t cuda \
     --force-overwrite true \
     -o "$OUT_NAME" \
-    "$BINARY"
+    "$BINARY" > "${OUT_NAME}_report.txt" 2>&1
 
-echo "Profiling complete. Results saved to ${OUT_NAME}.nsys-rep and ${OUT_NAME}.sqlite."
+echo "Profiling complete. Results saved to ${OUT_NAME}.nsys-rep, ${OUT_NAME}.sqlite, and ${OUT_NAME}_report.txt."

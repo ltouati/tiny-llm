@@ -27,6 +27,7 @@ struct VarAdamW {
     var: Var,
     first_moment: Var,
     second_moment: Var,
+    accum_grad: Option<candle_core::Tensor>,
 }
 
 pub struct FusedAdamW {
@@ -50,6 +51,7 @@ impl FusedAdamW {
                     var,
                     first_moment,
                     second_moment,
+                    accum_grad: None,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -68,7 +70,78 @@ impl FusedAdamW {
         Self::new(vars, params)
     }
 
-    pub fn step(&mut self, grads: &candle_core::backprop::GradStore) -> Result<()> {
+    pub fn set_lr(&mut self, lr: f64) {
+        self.params.lr = lr;
+    }
+
+    pub fn accumulate(
+        &mut self,
+        grads: &candle_core::backprop::GradStore,
+        accumulation_steps: usize,
+    ) -> Result<()> {
+        let scale = 1.0f32 / (accumulation_steps as f32);
+        for var in self.vars.iter_mut() {
+            if let Some(g) = grads.get(&var.var) {
+                if let Some(ag) = &var.accum_grad {
+                    let dev = g.device();
+                    let Device::Cuda(cuda_dev) = dev else {
+                        panic!("FusedAdamW only supports CUDA devices");
+                    };
+
+                    let ptx_content = include_str!(concat!(env!("OUT_DIR"), "/adamw.ptx"));
+                    let func_add = cuda_dev.get_or_load_custom_func(
+                        "inplace_add_bf16",
+                        "adamw",
+                        ptx_content,
+                    )?;
+
+                    let t_ag = ag.flatten_all()?;
+                    let t_g = g.flatten_all()?;
+
+                    let (ag_storage, _) = t_ag.storage_and_layout();
+                    let (g_storage, _) = t_g.storage_and_layout();
+
+                    let (ag_cuda, g_cuda) = match (&*ag_storage, &*g_storage) {
+                        (candle_core::Storage::Cuda(ag), candle_core::Storage::Cuda(g)) => (ag, g),
+                        _ => panic!("Expected CudaStorage"),
+                    };
+
+                    let in_ag = match &ag_cuda.slice {
+                        candle_core::cuda_backend::CudaStorageSlice::BF16(slice) => slice,
+                        _ => panic!("Expected BF16 storage for accum_grad"),
+                    };
+
+                    let in_g = match &g_cuda.slice {
+                        candle_core::cuda_backend::CudaStorageSlice::BF16(slice) => slice,
+                        _ => panic!("Expected BF16 storage for grad"),
+                    };
+
+                    let numel = t_ag.elem_count() as u32;
+                    let block_size = 1024u32;
+                    let grid_size = numel.div_ceil(block_size);
+
+                    let cfg = LaunchConfig {
+                        grid_dim: (grid_size, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    };
+
+                    let mut builder = func_add.builder();
+                    builder.arg(in_ag);
+                    builder.arg(in_g);
+                    builder.arg(&scale);
+                    builder.arg(&numel);
+
+                    unsafe { builder.launch(cfg) }.unwrap();
+                } else {
+                    var.accum_grad = Some(g.affine(scale as f64, 0.0)?.detach());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn step_with_accumulated(&mut self) -> Result<()> {
         self.step_t += 1;
         let lr = self.params.lr as f32;
         let lambda = self.params.weight_decay as f32;
@@ -85,7 +158,7 @@ impl FusedAdamW {
             let m = &var.first_moment;
             let v = &var.second_moment;
 
-            if let Some(g) = grads.get(theta) {
+            if let Some(g) = var.accum_grad.take() {
                 let Device::Cuda(dev) = theta.device() else {
                     panic!("FusedAdamW only supports CUDA devices");
                 };

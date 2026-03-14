@@ -143,3 +143,18 @@ extern "C" __global__ void adamw_bf16_step_fallback(
     v[idx]     = __float2bfloat16(v_t);
     theta[idx] = __float2bfloat16(next_weight);
 }
+
+extern "C" __global__ void inplace_add_bf16(
+    __nv_bfloat16* __restrict__ accum_grad,
+    const __nv_bfloat16* __restrict__ new_grad,
+    const float scale,
+    const uint32_t numel
+) {
+    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numel) return;
+
+    float ag = __bfloat162float(accum_grad[idx]);
+    float ng = __bfloat162float(new_grad[idx]);
+    
+    accum_grad[idx] = __float2bfloat16(ag + (ng * scale));
+}

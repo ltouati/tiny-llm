@@ -1,12 +1,11 @@
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
-use candle_nn::{VarBuilder, VarMap};
+use candle_nn::{loss::cross_entropy, VarBuilder, VarMap};
 use memmap2::MmapOptions;
 use rand::Rng;
 use std::fs::File;
 use std::time::Instant;
 use tiny_llm::fused_adamw::{FusedAdamW, ParamsAdamW};
-use tiny_llm::fused_cross_entropy::FusedCrossEntropy;
 
 // Import our architecture from the lib.rs file
 use tiny_llm::{Config, TinyLLM};
@@ -88,14 +87,8 @@ fn main() -> Result<()> {
                     let reserved_mb = 2000; // Leave 2GB for OS and CUDA context overhead
                     if free_mb > reserved_mb {
                         let available_mb_for_batches = free_mb - reserved_mb;
-                        // Heuristic: A 12-layer 70M model at 1024 context window requires far less memory per batch item.
-                        // We safely bound it to ~2000 MB per batch item to maintain high memory utilization.
-                        let memory_per_batch_item_mb = 2000.0;
-                        let calculated_batch =
-                            (available_mb_for_batches as f64 / memory_per_batch_item_mb) as usize;
+                        let calculated_batch = available_mb_for_batches / 1024;
 
-                        // For optimal cuBLAS kernel selection and to avoid insane workspace sizes,
-                        // we strictly enforce that the batch size is a multiple of 8 if possible, but fallback to 2 or 4.
                         batch_size = if calculated_batch >= 8 {
                             8 // Hardcap at 8 for 40GB A100 to prevent backward pass OOM
                         } else {
@@ -147,8 +140,8 @@ fn main() -> Result<()> {
     // Warmup is always exactly 10% of the total steps
     let warmup_steps: usize = (max_steps as f64 * 0.1) as usize;
 
-    let mut x_data_buf = vec![0u32; batch_size * config.seq_len];
-    let mut y_data_buf = vec![0u32; batch_size * config.seq_len];
+    let mut x_data_buf = vec![0u32; actual_global_batch_size * config.seq_len];
+    let mut y_data_buf = vec![0u32; actual_global_batch_size * config.seq_len];
 
     for step in start_epoch..=max_steps {
         // 1. Calculate and update learning rate
@@ -160,37 +153,55 @@ fn main() -> Result<()> {
         };
         opt.set_lr(lr);
 
-        // 2. Gradient Accumulation Loop
-        let mut avg_loss = 0.0;
-        for i in 0..grad_accum_steps {
-            for b in 0..batch_size {
-                let start = rng.gen_range(0..dataset.len() - config.seq_len - 1);
-                let b_offset = b * config.seq_len;
-                x_data_buf[b_offset..b_offset + config.seq_len]
-                    .copy_from_slice(&dataset[start..start + config.seq_len]);
-                y_data_buf[b_offset..b_offset + config.seq_len]
-                    .copy_from_slice(&dataset[start + 1..start + config.seq_len + 1]);
-            }
+        // Populate the Mega-Batch natively on CPU
+        for b in 0..actual_global_batch_size {
+            let start = rng.gen_range(0..dataset.len() - config.seq_len - 1);
+            let b_offset = b * config.seq_len;
+            x_data_buf[b_offset..b_offset + config.seq_len]
+                .copy_from_slice(&dataset[start..start + config.seq_len]);
+            y_data_buf[b_offset..b_offset + config.seq_len]
+                .copy_from_slice(&dataset[start + 1..start + config.seq_len + 1]);
+        }
 
-            let xs = Tensor::from_slice(&x_data_buf, (batch_size, config.seq_len), &device)?;
-            let ys = Tensor::from_slice(&y_data_buf, (batch_size, config.seq_len), &device)?;
+        // Host-To-Device Transfer (Mega-Batch)
+        // This transfers the entire batch once to the GPU, bypassing the PCIe bottleneck during accumulation
+        let xs_mega = Tensor::from_slice(
+            &x_data_buf,
+            (actual_global_batch_size, config.seq_len),
+            &device,
+        )?;
+        let ys_mega = Tensor::from_slice(
+            &y_data_buf,
+            (actual_global_batch_size, config.seq_len),
+            &device,
+        )?;
+
+        // 2. Gradient Accumulation Loop
+        let mut step_loss_sum = 0.0;
+        for grad_step in 0..grad_accum_steps {
+            // Slice the Mega-Batch natively within the GPU VRAM
+            let xs = xs_mega
+                .narrow(0, grad_step * batch_size, batch_size)?
+                .contiguous()?;
+            let ys = ys_mega
+                .narrow(0, grad_step * batch_size, batch_size)?
+                .contiguous()?;
 
             // Clear KV cache from the previous forward pass to prevent VRAM memory leaks
             model.clear_kv_cache();
 
-            // Forward Pass natively projecting to logits via CuBLAS Matrix Tiling
+            // Forward Pass natively in BF16
             let logits = model.forward(&xs, 0)?;
-            let logits_flat = logits.flatten_to(1)?;
+
+            let logits_f32 = logits.to_dtype(DType::F32)?;
+            drop(logits); // Instantly free 800MB of VRAM allocated by BF16 matrix memory
+
+            let logits_flat =
+                logits_f32.reshape((batch_size * config.seq_len, config.vocab_size))?;
             let y_flat = ys.flatten_all()?;
 
-            let fused_ce = FusedCrossEntropy { targets: y_flat };
-            let fused_loss = logits_flat.apply_op1(fused_ce)?;
-            let loss = (fused_loss.sum(0)? / (logits_flat.dim(0)? as f64))?;
-
-            if i == grad_accum_steps - 1 {
-                avg_loss = loss.to_dtype(candle_core::DType::F32)?.to_scalar::<f32>()?;
-            }
-
+            let loss = cross_entropy(&logits_flat, &y_flat)?;
+            step_loss_sum += loss.to_scalar::<f32>()?;
             let grads = loss.backward()?;
             opt.accumulate(&grads, grad_accum_steps)?;
 
@@ -198,6 +209,8 @@ fn main() -> Result<()> {
         }
 
         opt.step_with_accumulated()?;
+
+        let avg_loss = step_loss_sum / grad_accum_steps as f32;
 
         let elapsed = start_time.elapsed().as_secs_f32();
         let tokens_per_sec = (total_tokens as f32) / elapsed;
@@ -218,7 +231,7 @@ fn main() -> Result<()> {
 
         if step % checkpoint_interval == 0 {
             let filename = format!("fineweb_checkpoint_{}.safetensors", step);
-            varmap.save(&filename)?;
+            // varmap.save(&filename)?;
             println!(">> Saved {} to disk! <<", filename);
         }
     }

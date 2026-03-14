@@ -9,7 +9,13 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-echo "Running HellaSwag Evaluation benchmark..."
+echo "Running Option A: Native HellaSwag Evaluation benchmark (Simple Mode)..."
 echo "=========================================="
-cargo run --release --bin eval
+cargo run --release --bin eval -- --mode simple
+echo "=========================================="
+
+echo ""
+echo "Running Option B: lm-evaluation-harness (Extended Mode)..."
+echo "=========================================="
+cargo run --release --bin eval -- --mode extended
 echo "=========================================="
