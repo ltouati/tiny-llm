@@ -1,18 +1,17 @@
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
+use candle_core::{DType, Tensor};
 use candle_nn::{VarBuilder, VarMap};
 use memmap2::MmapOptions;
 use rand::Rng;
 use std::fs::File;
 use std::time::Instant;
 use tiny_llm::fused_adamw::{FusedAdamW, ParamsAdamW};
-use tiny_llm::fused_cross_entropy::FusedCrossEntropy;
 
 // Import our architecture from the lib.rs file
 use tiny_llm::{Config, TinyLLM};
 
 fn main() -> Result<()> {
-    let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
+    let device = candle_core::Device::new_cuda(0)?;
     println!("Training natively on: {:?}", device);
 
     let config = Config::load_from_file("config.json").unwrap_or_default();
@@ -179,19 +178,41 @@ fn main() -> Result<()> {
             model.clear_kv_cache();
 
             // Forward Pass natively projecting to logits via CuBLAS Matrix Tiling
-            let logits = model.forward(&xs, 0)?;
-            let logits_flat = logits.flatten_to(1)?;
-            let y_flat = ys.flatten_all()?;
+            let (logits, out) = model.forward(&xs, 0)?;
 
-            let fused_ce = FusedCrossEntropy { targets: y_flat };
-            let fused_loss = logits_flat.apply_op1(fused_ce)?;
-            let loss = (fused_loss.sum(0)? / (logits_flat.dim(0)? as f64))?;
+            let fused_ce = tiny_llm::fused_cross_entropy::FusedCrossEntropy {
+                targets: ys.clone(),
+            };
+            let fused_loss = logits.apply_op1(fused_ce)?;
+            let loss = (fused_loss.sum_all()? / (logits.elem_count() / config.vocab_size) as f64)?;
 
             if i == grad_accum_steps - 1 {
                 avg_loss = loss.to_dtype(candle_core::DType::F32)?.to_scalar::<f32>()?;
             }
 
-            let grads = loss.backward()?;
+            // Manually evaluate gradients to bypass Candle Autograd allocations
+            use candle_core::CustomOp1;
+            let n_tokens = (logits.elem_count() / config.vocab_size) as f32;
+            let d_loss = (fused_loss.ones_like()? / (n_tokens as f64))?;
+
+            let fused_ce_bwd = tiny_llm::fused_cross_entropy::FusedCrossEntropy { targets: ys };
+            let d_logits = fused_ce_bwd.bwd(&logits, &fused_loss, &d_loss)?.unwrap();
+
+            let d_logits_flat = d_logits.flatten_to(1)?;
+            let out_flat = out.flatten_to(1)?;
+
+            // To avoid forcing a 100MB contiguous transpose, we transpose the 1.5MB out_flat tensor!
+            // d_W_t has shape [H, V]
+            let d_w_t = out_flat.t()?.matmul(&d_logits_flat)?;
+            // d_W has shape [V, H]
+            let d_w = d_w_t.t()?;
+
+            // Dummy tensor backward empty pass to initialize GradStore
+            let dummy = candle_core::Tensor::zeros(1, candle_core::DType::F32, &device)?;
+            let mut grads = dummy.backward()?;
+
+            // Inject our gradient tensor natively into GradStore map directly
+            grads.insert_id(model.lm_head().weight().id(), d_w);
             opt.accumulate(&grads, grad_accum_steps)?;
 
             total_tokens += batch_size * config.seq_len;

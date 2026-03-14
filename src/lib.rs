@@ -259,9 +259,9 @@ impl TinyLLM {
         self.ln_f.forward(&out)
     }
 
-    pub fn forward(&self, x: &Tensor, start_pos: usize) -> Result<Tensor> {
+    pub fn forward(&self, x: &Tensor, start_pos: usize) -> Result<(Tensor, Tensor)> {
         let out = self.forward_hidden(x, start_pos)?;
-        self.lm_head.forward(&out)
+        Ok((self.lm_head.forward(&out)?, out))
     }
 
     pub fn lm_head(&self) -> &Linear {

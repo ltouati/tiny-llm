@@ -158,3 +158,19 @@ extern "C" __global__ void inplace_add_bf16(
     
     accum_grad[idx] = __float2bfloat16(ag + (ng * scale));
 }
+extern "C" __global__ void fast_add_bf16(
+    __nv_bfloat16* __restrict__ out,
+    const __nv_bfloat16* __restrict__ in1,
+    const __nv_bfloat16* __restrict__ in2,
+    const uint32_t numel,
+    const uint32_t offset1,
+    const uint32_t offset2
+) {
+    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numel) return;
+
+    float a = __bfloat162float(in1[idx + offset1]);
+    float b = __bfloat162float(in2[idx + offset2]);
+    
+    out[idx] = __float2bfloat16(a + b);
+}

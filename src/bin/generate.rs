@@ -74,7 +74,7 @@ fn main() -> Result<()> {
 
     for _ in 0..max_tokens_to_generate {
         let input = Tensor::from_vec(next_tokens.clone(), (1, next_tokens.len()), &device)?;
-        let logits = model.forward(&input, start_pos)?;
+        let (logits, _) = model.forward(&input, start_pos)?;
 
         let (_, seq_len, _) = logits.dims3()?;
         let last_token_logits = logits

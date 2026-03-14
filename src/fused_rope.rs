@@ -53,7 +53,7 @@ impl CustomOp1 for FusedRope {
         };
 
         // Allocate output buffer dynamically matching exact total bounds natively
-        let s_out = dev.alloc_zeros::<half::bf16>(total_elements as usize)?;
+        let s_out = unsafe { dev.alloc::<half::bf16>(total_elements as usize) }?;
 
         let num_pairs = total_elements / 2;
 

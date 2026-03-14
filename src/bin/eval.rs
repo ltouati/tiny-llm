@@ -245,7 +245,8 @@ async fn handle_completions_inner(
         // If echo is true, we should include the prompt's logprobs
         if echo && req_logprobs.is_some() && !tokens.is_empty() {
             let input = Tensor::from_vec(tokens.clone(), (1, tokens.len()), &state.device)?;
-            let logits = model.forward(&input, 0)?.squeeze(0)?.to_dtype(DType::F32)?;
+            let (logits, _) = model.forward(&input, 0)?;
+            let logits = logits.squeeze(0)?.to_dtype(DType::F32)?;
             let log_probs = candle_nn::ops::log_softmax(&logits, D::Minus1)?.to_vec2::<f32>()?;
 
             for j in 0..tokens.len() {
@@ -274,7 +275,7 @@ async fn handle_completions_inner(
                 (1, sliced_tokens.len()),
                 &state.device,
             )?;
-            let logits = model.forward(&input, 0)?;
+            let (logits, _) = model.forward(&input, 0)?;
 
             let (_, s_len, _) = logits.dims3()?;
             let last_token_logits = logits
@@ -329,7 +330,8 @@ async fn handle_completions_inner(
         // purely evaluating logprobs of the prompt
         if req_logprobs.is_some() && !tokens.is_empty() {
             let input = Tensor::from_vec(tokens.clone(), (1, tokens.len()), &state.device)?;
-            let logits = model.forward(&input, 0)?.squeeze(0)?.to_dtype(DType::F32)?;
+            let (logits, _) = model.forward(&input, 0)?;
+            let logits = logits.squeeze(0)?.to_dtype(DType::F32)?;
             let log_probs = candle_nn::ops::log_softmax(&logits, D::Minus1)?.to_vec2::<f32>()?;
 
             for j in 0..tokens.len() {
@@ -488,7 +490,7 @@ async fn run_simple_eval(
         let input = Tensor::from_vec(batched_data, (num_choices, max_len), &device)?;
 
         model.clear_kv_cache(); // Ensure KV cache starts clean for the whole batch
-        let logits = model.forward(&input, 0)?;
+        let (logits, _) = model.forward(&input, 0)?;
 
         let logits = logits.to_dtype(DType::F32)?;
         let log_probs = candle_nn::ops::log_softmax(&logits, D::Minus1)?;

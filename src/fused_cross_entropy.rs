@@ -124,33 +124,24 @@ impl candle_core::CustomOp1 for FusedCrossEntropy {
             ));
         };
 
-        let logits_dims = arg1.shape().dims();
-        let vocab_size = *logits_dims.last().unwrap();
-        let num_tokens = arg1.shape().elem_count() / vocab_size; // Total N
+        let vocab_size = *arg1.shape().dims().last().unwrap() as u32;
+        let num_tokens = (arg1.shape().elem_count() / vocab_size as usize) as u32;
 
         let dev = s_logits.device();
         let func =
             dev.get_or_load_custom_func("cross_entropy_bwd", "cross_entropy", PTX_CONTENT)?;
 
         // Output tensor for logits gradient: [N, V] in BF16 natively (no F32)
-        // Using `half::bf16` directly to let device allocate
-        let s_grad_logits = dev.alloc_zeros::<half::bf16>(num_tokens * vocab_size)?;
+        let s_grad_logits = unsafe { dev.alloc::<half::bf16>((num_tokens * vocab_size) as usize) }?;
 
         let block_size = 1024;
-        let grid_size = num_tokens as u32;
+        let grid_size = num_tokens;
 
         let cfg = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
             shared_mem_bytes: 0,
         };
-
-        let mut builder = func.builder();
-        builder.arg(in_logits);
-        builder.arg(in_targets);
-        builder.arg(&s_grad_logits);
-        let vocab_size_u32 = vocab_size as u32;
-        builder.arg(&vocab_size_u32);
 
         let grad_res_contig = grad_res.contiguous()?;
         let (grad_res_storage, _) = grad_res_contig.storage_and_layout();
@@ -161,6 +152,13 @@ impl candle_core::CustomOp1 for FusedCrossEntropy {
         else {
             return Err(Error::Msg("Expected F32 storage for grad_res".into()));
         };
+
+        let mut builder = func.builder();
+        builder.arg(in_logits);
+        builder.arg(in_targets);
+        builder.arg(&s_grad_logits);
+        let vocab_size_i32 = vocab_size as i32;
+        builder.arg(&vocab_size_i32);
         builder.arg(in_grad_res);
 
         unsafe { builder.launch(cfg) }.unwrap();
