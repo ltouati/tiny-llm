@@ -1,11 +1,8 @@
 use anyhow::{Context, Result};
-use indicatif::{ProgressBar, ProgressStyle};
 use parquet::file::reader::FileReader;
 use rayon::prelude::*;
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use tokenizers::Tokenizer;
 use tokio::sync::mpsc;
 
@@ -105,26 +102,6 @@ async fn main() -> Result<()> {
             rayon::current_num_threads()
         );
 
-        let pb_tokens = ProgressBar::new(texts_len as u64);
-        pb_tokens.set_style(ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} docs ({per_sec})")
-            .unwrap()
-            .progress_chars("#>-"));
-
-        let counter = Arc::new(AtomicUsize::new(0));
-        let c = counter.clone();
-        let texts_len_clone = texts_len;
-        let pb_clone = pb_tokens.clone();
-
-        let pb_thread = std::thread::spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            let current = c.load(Ordering::Relaxed);
-            pb_clone.set_position(current as u64);
-            if current >= texts_len_clone {
-                break;
-            }
-        });
-
         let chunked_tokens: Vec<Vec<u32>> = texts
             .par_iter()
             .filter_map(|text| {
@@ -137,13 +114,11 @@ async fn main() -> Result<()> {
                         result = Some(tokens);
                     }
                 }
-                counter.fetch_add(1, Ordering::Relaxed);
                 result
             })
             .collect();
 
-        let _ = pb_thread.join();
-        pb_tokens.finish_with_message(format!("Tokenization complete for shard {}", shard));
+        println!("Tokenization complete for shard {}", shard);
 
         for doc_tokens in chunked_tokens {
             let bytes: &[u8] = bytemuck::cast_slice(&doc_tokens);
@@ -172,4 +147,27 @@ async fn main() -> Result<()> {
     println!("Done! Saved {} tokens to {}.", total_tokens, OUTPUT_FILE);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tokenizer_invertibility() -> Result<()> {
+        let tokenizer = Tokenizer::from_file("tokenizer.json")
+            .map_err(|e| anyhow::anyhow!(e.to_string()))
+            .context("Could not load tokenizer.json. Did you download it?")?;
+
+        let original_text = "The quick brown fox jumps over the lazy dog. 12345! @#$% \n\n Testing tokenization... 🚀";
+
+        let encoding = tokenizer.encode(original_text, true).unwrap();
+        let decoded_text = tokenizer.decode(encoding.get_ids(), false).unwrap();
+
+        assert_eq!(
+            original_text, decoded_text,
+            "Tokenizer decode(encode(text)) did not identically match original text!"
+        );
+        Ok(())
+    }
 }

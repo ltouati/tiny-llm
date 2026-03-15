@@ -27,7 +27,8 @@ rayon = "1.11.0"
 tokio-stream = "0.1.18"
 futures = "0.3.32"
 bytes = "1.11.1"
-indicatif = "0.18.4"
+tensorboard-rs = "0.5.9"
+chrono = "0.4.44"
 
 [[bin]]
 name = "train"
@@ -48,3 +49,9 @@ path = "src/bin/prep_data.rs"
 
 [build-dependencies]
 cc = "1.2.56"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[package.metadata.cargo-shear]
+ignored = ["candle-flash-attn", "bytes", "sysinfo", "cc", "tokio-stream", "futures", "cudarc"]

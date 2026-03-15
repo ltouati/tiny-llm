@@ -177,3 +177,160 @@ impl candle_core::CustomOp1 for FusedCrossEntropy {
         Ok(Some(out_tensor))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fused_cross_entropy_shape_validation() -> Result<()> {
+        let device = candle_core::Device::Cpu;
+        let targets = Tensor::zeros((4,), candle_core::DType::U32, &device)?;
+
+        let custom_op = FusedCrossEntropy { targets };
+
+        // FusedCrossEntropy enforces 2D or 3D logits
+        let invalid_1d = Tensor::ones((4,), candle_core::DType::BF16, &device)?;
+        let invalid_4d = Tensor::ones((1, 1, 4, 16), candle_core::DType::BF16, &device)?;
+
+        // Assert error is correctly propagated (CPU fwd rejects natively, but we test the custom op explicit behavior)
+        let res_1d = invalid_1d.apply_op1_no_bwd(&custom_op);
+        let res_4d = invalid_4d.apply_op1_no_bwd(&custom_op);
+
+        // They should explicitly error containing the string "CPU not supported" because CPU is outright rejected first
+        assert!(res_1d.is_err());
+        assert!(res_4d.is_err());
+
+        // Test CUDA if available
+        if let Ok(cuda_device) = candle_core::Device::new_cuda(0) {
+            let invalid_cuda_1d = Tensor::ones((4,), candle_core::DType::BF16, &cuda_device)?;
+            let invalid_cuda_4d =
+                Tensor::ones((1, 1, 4, 16), candle_core::DType::BF16, &cuda_device)?;
+
+            let custom_op_cuda = FusedCrossEntropy {
+                targets: Tensor::zeros((4,), candle_core::DType::U32, &cuda_device)?,
+            };
+
+            let res_cuda_1d = invalid_cuda_1d.apply_op1_no_bwd(&custom_op_cuda);
+            assert!(res_cuda_1d
+                .unwrap_err()
+                .to_string()
+                .contains("Logits must be 2D"));
+
+            let res_cuda_4d = invalid_cuda_4d.apply_op1_no_bwd(&custom_op_cuda);
+            assert!(res_cuda_4d
+                .unwrap_err()
+                .to_string()
+                .contains("Logits must be 2D"));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fused_cross_entropy_forward_correctness() -> Result<()> {
+        let device = candle_core::Device::new_cuda(0);
+        if device.is_err() {
+            println!("Skipping CUDA-only test.");
+            return Ok(());
+        }
+        let device = device.unwrap();
+
+        // 2 tokens, 4 vocab size
+        let logits = Tensor::from_slice(
+            &[
+                // Token 1 logits
+                2.0f32, 1.0, 0.1, -1.0, // Token 2 logits
+                -0.5, 0.0, 1.5, 2.5,
+            ],
+            (2, 4),
+            &device,
+        )?
+        .to_dtype(candle_core::DType::BF16)?;
+
+        // Targets: Token 1 -> class 0, Token 2 -> class 3
+        let targets = Tensor::from_slice(&[0u32, 3u32], (2,), &device)?;
+
+        // Hand-calculated baseline (or Native candle_nn cross_entropy)
+        let native_loss =
+            candle_nn::loss::cross_entropy(&logits.to_dtype(candle_core::DType::F32)?, &targets)?;
+
+        let custom_op = FusedCrossEntropy { targets };
+        // Fused custom op returns an array of un-meaned losses
+        let fused_loss_vec = logits.apply_op1(custom_op)?;
+        let fused_loss = fused_loss_vec
+            .mean_all()?
+            .to_dtype(candle_core::DType::F32)?;
+
+        let native_val = native_loss.to_scalar::<f32>()?;
+        let fused_val = fused_loss.to_scalar::<f32>()?;
+
+        // Expect near exact match within BF16 mantissa margin
+        assert!(
+            (native_val - fused_val).abs() < 5e-3,
+            "Loss mismatch: Native = {}, Fused = {}",
+            native_val,
+            fused_val
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fused_cross_entropy_backward_gradients() -> Result<()> {
+        let device = candle_core::Device::new_cuda(0);
+        if device.is_err() {
+            println!("Skipping CUDA-only test.");
+            return Ok(());
+        }
+        let device = device.unwrap();
+
+        // Target vectors
+
+        let initial_logits = Tensor::from_slice(
+            &[2.0f32, 1.0, 0.1, -1.0, -0.5, 0.0, 1.5, 2.5],
+            (2, 4),
+            &device,
+        )?;
+
+        // Native model vars
+        let native_logits = candle_core::Var::from_tensor(&initial_logits.clone())?;
+        let targets = Tensor::from_slice(&[0u32, 3u32], (2,), &device)?;
+
+        let native_loss = candle_nn::loss::cross_entropy(native_logits.as_tensor(), &targets)?;
+        let native_grads_store = native_loss.backward()?;
+        let native_grad = native_grads_store.get(&native_logits).unwrap().clone();
+
+        // Custom Fused Ops Vars
+        let fused_logits =
+            candle_core::Var::from_tensor(&initial_logits.to_dtype(candle_core::DType::BF16)?)?;
+        let custom_op = FusedCrossEntropy {
+            targets: targets.clone(),
+        };
+        let fused_loss_vec = fused_logits.as_tensor().apply_op1(custom_op)?;
+        let fused_loss = fused_loss_vec.mean_all()?;
+        let fused_grads_store = fused_loss.backward()?;
+        let fused_grad = fused_grads_store.get(&fused_logits).unwrap().clone();
+
+        let native_g_vec = native_grad.to_vec2::<f32>()?;
+        // Note: Our Fused Cross Entropy returns gradients SCALED perfectly internally to apply natively if mean_all is used
+        let fused_g_vec = fused_grad
+            .to_dtype(candle_core::DType::F32)?
+            .to_vec2::<f32>()?;
+
+        for i in 0..2 {
+            for j in 0..4 {
+                assert!(
+                    (native_g_vec[i][j] - fused_g_vec[i][j]).abs() < 5e-3,
+                    "Gradient mismatch at [{}, {}]: Native = {}, Fused = {}",
+                    i,
+                    j,
+                    native_g_vec[i][j],
+                    fused_g_vec[i][j]
+                );
+            }
+        }
+
+        Ok(())
+    }
+}

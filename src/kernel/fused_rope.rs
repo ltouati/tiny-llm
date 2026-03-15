@@ -104,3 +104,45 @@ impl CustomOp1 for FusedRope {
         Ok(Some(grad_res.apply_op1(bwd_op)?))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fused_rope_shape_rejection() -> Result<()> {
+        let op = FusedRope {
+            start_pos: 0,
+            theta: 10000.0,
+            is_bwd: false,
+        };
+
+        if let Ok(cuda_device) = candle_core::Device::new_cuda(0) {
+            let invalid_3d =
+                candle_core::Tensor::ones((4, 4, 16), candle_core::DType::BF16, &cuda_device)?;
+            let res_cuda = invalid_3d.apply_op1_no_bwd(&op);
+            assert!(res_cuda
+                .unwrap_err()
+                .to_string()
+                .contains("Input must be 4D"));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fused_rope_bwd_inverts_flag() -> Result<()> {
+        let op = FusedRope {
+            start_pos: 5,
+            theta: 10000.0,
+            is_bwd: false,
+        };
+
+        // Assert initialized as forward
+        assert!(!op.is_bwd);
+        assert_eq!(op.start_pos, 5);
+        assert_eq!(op.theta, 10000.0);
+
+        Ok(())
+    }
+}

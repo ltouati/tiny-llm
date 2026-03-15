@@ -4,7 +4,13 @@ use std::process::Command;
 
 fn compile_cuda_kernel(filename: &str) {
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR not set");
-    let name = filename.split('.').next().unwrap();
+    let name = filename
+        .split('/')
+        .next_back()
+        .unwrap()
+        .split('.')
+        .next()
+        .unwrap();
     let ptx_path = format!("{}/{}.ptx", out_dir, name);
     let src_path = format!("src/{}", filename);
 
@@ -31,11 +37,17 @@ fn compile_cuda_kernel(filename: &str) {
 
 fn main() {
     println!("cargo:rerun-if-changed=requirements.txt");
-    println!("cargo:rerun-if-changed=src/adamw.cu");
-    println!("cargo:rerun-if-changed=src/cross_entropy.cu");
-    println!("cargo:rerun-if-changed=src/rope.cu");
+    println!("cargo:rerun-if-changed=src/kernel/adamw.cu");
+    println!("cargo:rerun-if-changed=src/kernel/cross_entropy.cu");
+    println!("cargo:rerun-if-changed=src/kernel/rope.cu");
 
-    compile_cuda_kernel("adamw.cu");
-    compile_cuda_kernel("cross_entropy.cu");
-    compile_cuda_kernel("rope.cu");
+    let kernels = [
+        "kernel/adamw.cu",
+        "kernel/cross_entropy.cu",
+        "kernel/rope.cu",
+    ];
+
+    for kernel_file in &kernels {
+        compile_cuda_kernel(kernel_file);
+    }
 }

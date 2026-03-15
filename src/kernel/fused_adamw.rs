@@ -274,3 +274,212 @@ impl FusedAdamW {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::{DType, Device, Tensor};
+
+    #[test]
+    fn test_fused_adamw_initialization() -> Result<()> {
+        let device = Device::Cpu; // Initialize with CPU to test purely structural allocation
+        let var1 = Var::zeros((10, 10), DType::F32, &device)?;
+        let var2 = Var::ones((5, 5), DType::F32, &device)?;
+
+        // FusedAdamW requires explicitly extracting variables as Vec<Var>
+        let vars = vec![var1.clone(), var2.clone()];
+
+        let params = ParamsAdamW {
+            lr: 0.01,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            weight_decay: 0.05,
+        };
+
+        let adamw = FusedAdamW::new(vars, params.clone())?;
+
+        // Assert parameters were bound correctly
+        assert_eq!(adamw.params.lr, 0.01);
+        assert_eq!(adamw.params.weight_decay, 0.05);
+
+        // Assert internal variables match expected sizes and dimensions
+        assert_eq!(adamw.vars.len(), 2);
+
+        // First variable checks
+        assert_eq!(adamw.vars[0].var.shape().dims(), &[10, 10]);
+        assert_eq!(adamw.vars[0].first_moment.shape().dims(), &[10, 10]);
+        assert_eq!(adamw.vars[0].second_moment.shape().dims(), &[10, 10]);
+        assert!(adamw.vars[0].accum_grad.is_none());
+
+        // Second variable checks
+        assert_eq!(adamw.vars[1].var.shape().dims(), &[5, 5]);
+        assert_eq!(adamw.vars[1].first_moment.shape().dims(), &[5, 5]);
+        assert_eq!(adamw.vars[1].second_moment.shape().dims(), &[5, 5]);
+        assert!(adamw.vars[1].accum_grad.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fused_adamw_accumulate() -> Result<()> {
+        let device = Device::new_cuda(0);
+        if device.is_err() {
+            println!("Skipping CUDA-only test.");
+            return Ok(());
+        }
+        let device = device.unwrap();
+
+        // Target test Var
+        let initial_val = Tensor::from_slice(&[0.0f32; 4], (4,), &device)?.to_dtype(DType::BF16)?;
+        let var1 = Var::from_tensor(&initial_val)?;
+
+        // Fake Gradients
+
+        let grad1 =
+            Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0], (4,), &device)?.to_dtype(DType::BF16)?;
+
+        // Mock a grad store manually
+        let mut adamw = FusedAdamW::new(vec![var1.clone()], ParamsAdamW::default())?;
+
+        // Build an explicit node structure using loss scaling backprop mathematically to get a valid GradStore mapping natively
+        let loss = var1.as_tensor().sum_all()?;
+        let mut grad_store = loss.backward()?;
+
+        // Overwrite the backward extraction natively within the Grad Store dictionary mapping exactly
+        grad_store.insert(&var1, grad1.clone());
+
+        // Accumulate 2 Steps: First step sets the value to `grad * 1/2`.
+        adamw.accumulate(&grad_store, 2)?;
+
+        let out1 = adamw.vars[0]
+            .accum_grad
+            .as_ref()
+            .unwrap()
+            .to_dtype(DType::F32)?
+            .to_vec1::<f32>()?;
+
+        // Expected: grad1 * 0.5
+        assert!((out1[0] - 0.5).abs() < 1e-3);
+        assert!((out1[1] - 1.0).abs() < 1e-3);
+        assert!((out1[2] - 1.5).abs() < 1e-3);
+        assert!((out1[3] - 2.0).abs() < 1e-3);
+
+        // Second step adds another `grad * 1/2`.
+        let grad2 =
+            Tensor::from_slice(&[2.0f32, 4.0, -1.0, 0.0], (4,), &device)?.to_dtype(DType::BF16)?;
+        grad_store.insert(&var1, grad2);
+
+        adamw.accumulate(&grad_store, 2)?;
+        let out2 = adamw.vars[0]
+            .accum_grad
+            .as_ref()
+            .unwrap()
+            .to_dtype(DType::F32)?
+            .to_vec1::<f32>()?;
+
+        // Expected cumulative: [0.5, 1.0, 1.5, 2.0] + ([2.0, 4.0, -1.0, 0.0] * 0.5)
+        // = [0.5 + 1.0, 1.0 + 2.0, 1.5 - 0.5, 2.0 + 0.0]
+        // = [1.5, 3.0, 1.0, 2.0]
+        assert!((out2[0] - 1.5).abs() < 1e-2);
+        assert!((out2[1] - 3.0).abs() < 1e-2);
+        assert!((out2[2] - 1.0).abs() < 1e-2);
+        assert!((out2[3] - 2.0).abs() < 1e-2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fused_adamw_step() -> Result<()> {
+        let device = Device::new_cuda(0);
+        if device.is_err() {
+            println!("Skipping CUDA-only test.");
+            return Ok(());
+        }
+        let device = device.unwrap();
+
+        let initial_val =
+            Tensor::from_slice(&[1.0f32, 2.0, -1.0, 0.5], (4,), &device)?.to_dtype(DType::BF16)?;
+        let var1 = Var::from_tensor(&initial_val)?;
+
+        let params = ParamsAdamW {
+            lr: 0.1,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            weight_decay: 0.01,
+        };
+
+        let mut adamw = FusedAdamW::new(vec![var1.clone()], params)?;
+
+        // Manually inject accumulated gradients
+        let ag =
+            Tensor::from_slice(&[0.1f32, -0.2, 0.3, -0.1], (4,), &device)?.to_dtype(DType::BF16)?;
+        adamw.vars[0].accum_grad = Some(ag);
+
+        // Step 1 Execution
+        adamw.step_with_accumulated()?;
+
+        // Calculate expected values for Step 1
+        // Step 1 specifics:
+        // lr = 0.1, beta1 = 0.9, beta2 = 0.999, wd = 0.01, eps = 1e-8
+        // t = 1
+        // scale_m = 1 / (1 - 0.9) = 10
+        // scale_v = 1 / (1 - 0.999) = 1000
+        //
+        // For element 0:
+        // theta = 1.0, g = 0.1
+        // theta = theta * (1 - lr * wd) = 1.0 * (1 - 0.001) = 0.999
+        // m = beta1 * m + (1 - beta1) * g = 0.9 * 0 + 0.1 * 0.1 = 0.01
+        // v = beta2 * v + (1 - beta2) * g^2 = 0.999 * 0 + 0.001 * 0.01 = 0.00001
+        // m_hat = m * scale_m = 0.01 * 10 = 0.1
+        // v_hat = v * scale_v = 0.00001 * 1000 = 0.01
+        // update = m_hat / (sqrt(v_hat) + eps) = 0.1 / (0.1 + 1e-8) ≈ 1.0
+        // theta = theta - lr * update = 0.999 - 0.1 * 1.0 = 0.899
+
+        let out = adamw.vars[0]
+            .var
+            .as_tensor()
+            .to_dtype(DType::F32)?
+            .to_vec1::<f32>()?;
+
+        let expected_theta_0 = 1.0 * (1.0 - 0.1 * 0.01)
+            - 0.1 * (0.01 * 10.0) / ((0.001 * 0.01 * 1000.0f32).sqrt() + 1e-8);
+        let expected_theta_1 = 2.0 * (1.0 - 0.1 * 0.01)
+            - 0.1 * (-0.02 * 10.0) / ((0.001 * 0.04 * 1000.0f32).sqrt() + 1e-8);
+        let expected_theta_2 =
+            -(1.0 - 0.1 * 0.01) - 0.1 * (0.03 * 10.0) / ((0.001 * 0.09 * 1000.0f32).sqrt() + 1e-8);
+        let expected_theta_3 = 0.5 * (1.0 - 0.1 * 0.01)
+            - 0.1 * (-0.01 * 10.0) / ((0.001 * 0.01 * 1000.0f32).sqrt() + 1e-8);
+
+        assert!(
+            (out[0] - expected_theta_0).abs() < 5e-3,
+            "Index 0 Failed: Out = {}, Expected ≈ {}",
+            out[0],
+            expected_theta_0
+        );
+        assert!(
+            (out[1] - expected_theta_1).abs() < 5e-3,
+            "Index 1 Failed: Out = {}, Expected ≈ {}",
+            out[1],
+            expected_theta_1
+        );
+        assert!(
+            (out[2] - expected_theta_2).abs() < 5e-3,
+            "Index 2 Failed: Out = {}, Expected ≈ {}",
+            out[2],
+            expected_theta_2
+        );
+        assert!(
+            (out[3] - expected_theta_3).abs() < 5e-3,
+            "Index 3 Failed: Out = {}, Expected ≈ {}",
+            out[3],
+            expected_theta_3
+        );
+
+        // Assert accum_grad is consumed correctly
+        assert!(adamw.vars[0].accum_grad.is_none());
+
+        Ok(())
+    }
+}
