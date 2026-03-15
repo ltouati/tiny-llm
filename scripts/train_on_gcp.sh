@@ -14,11 +14,11 @@ function handle_ctrlc() {
     
     if gcloud compute instances describe "$INSTANCE_NAME" --zone="$ZONE" &> /dev/null; then
         echo "Attempting to upload checkpoints from VM..."
-        gcloud compute ssh "$INSTANCE_NAME" --zone="$ZONE" --ssh-flag="-o ConnectTimeout=10" --command="cd /opt/tiny-llm && gcloud storage cp *.safetensors $BUCKET_NAME/checkpoints/$RUN_ID/" 2>/dev/null || echo "⚠️ No checkpoints found or SSH not ready."
+        gcloud compute ssh "$INSTANCE_NAME" --zone="$ZONE" --ssh-flag="-o ConnectTimeout=10" --command="cd /opt/tiny-llm && gcloud storage cp -r checkpoints_burn "$BUCKET_NAME/checkpoints/$RUN_ID/"" 2>/dev/null || echo "⚠️ No checkpoints found or SSH not ready."
         
         if [ "$IMAGE_EXISTS" = "false" ]; then
-            echo "Removing safetensors before baking machine image..."
-            gcloud compute ssh "$INSTANCE_NAME" --zone="$ZONE" --ssh-flag="-o ConnectTimeout=10" --command="rm -f /opt/tiny-llm/*.safetensors" 2>/dev/null || true
+            echo "Removing checkpoints before baking machine image..."
+            gcloud compute ssh "$INSTANCE_NAME" --zone="$ZONE" --ssh-flag="-o ConnectTimeout=10" --command="rm -rf /opt/tiny-llm/checkpoints_burn" 2>/dev/null || true
             
             echo "Shutting down VM so host can bake machine image..."
             gcloud compute ssh "$INSTANCE_NAME" --zone="$ZONE" --ssh-flag="-o ConnectTimeout=10" --command="sudo sync && sudo poweroff" 2>/dev/null || true
@@ -40,7 +40,7 @@ function handle_ctrlc() {
         echo ""
         echo "⬇️  To download your checkpoints locally, run:"
         echo "    mkdir -p checkpoints/$RUN_ID"
-        echo "    gcloud storage cp $BUCKET_NAME/checkpoints/$RUN_ID/*.safetensors checkpoints/$RUN_ID/"
+        echo "    gcloud storage cp -r $BUCKET_NAME/checkpoints/$RUN_ID/checkpoints_burn checkpoints/$RUN_ID/"
     else
         echo "VM $INSTANCE_NAME does not exist. Nothing to clean up."
     fi
@@ -160,6 +160,8 @@ if [ -f "target.tar.gz" ]; then
     rm target.tar.gz
 fi
 
+
+
 echo "Compiling TinyLLM natively on A100..."
 cargo build --release --bin train
 echo "Archiving and uploading compilation cache back to Bucket..."
@@ -169,8 +171,10 @@ gcloud storage cp target.tar.gz "$BUCKET_NAME/cache/" || true
 echo "Running training loop..."
 ./target/release/train || { echo "❌ Training loop crashed or was terminated. Proceeding to cleanup..."; }
 
+
+
 echo "Uploading checkpoints back to bucket..."
-gcloud storage cp *.safetensors "$BUCKET_NAME/checkpoints/$RUN_ID/" || true
+gcloud storage cp -r checkpoints_burn/ "$BUCKET_NAME/checkpoints/$RUN_ID/" || true
 
 echo "Training complete."
 if [ "$IMAGE_EXISTS" = "false" ]; then
