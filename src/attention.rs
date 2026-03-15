@@ -10,6 +10,7 @@ pub struct CausalSelfAttention {
     out_proj: Linear,
     config: Config,
     kv_cache: Mutex<Option<(Tensor, Tensor)>>,
+    mask_cache: Mutex<Option<Tensor>>,
 }
 
 impl CausalSelfAttention {
@@ -37,6 +38,7 @@ impl CausalSelfAttention {
             )?,
             config,
             kv_cache: Mutex::new(None),
+            mask_cache: Mutex::new(None),
         })
     }
 
@@ -128,15 +130,33 @@ impl CausalSelfAttention {
         let v_expand = v_expand.transpose(1, 2)?.contiguous()?; // [b_sz, num_heads, seq_len, head_dim]
 
         let att = q_trans.matmul(&k_expand.t()?)?;
-        let att = (att / (self.config.head_dim() as f64).sqrt())?;
+        let scale = 1.0 / (self.config.head_dim() as f64).sqrt();
+        let att = att.affine(scale, 0.0)?;
 
         // Causal Masking
-        let mask: Vec<_> = (0..seq_len)
-            .flat_map(|i| (0..seq_len).map(move |j| if j > i { f32::NEG_INFINITY } else { 0f32 }))
-            .collect();
-        let mask =
-            Tensor::from_slice(&mask, (seq_len, seq_len), x.device())?.to_dtype(att.dtype())?;
-        let mask = mask.broadcast_as(att.shape())?;
+        let mut mask_cache_guard = self.mask_cache.lock().unwrap();
+        let mask_tensor = if let Some(m) = &*mask_cache_guard {
+            if m.dim(0)? >= seq_len {
+                m.narrow(0, 0, seq_len)?.narrow(1, 0, seq_len)?
+            } else {
+                let mask: Vec<_> = (0..seq_len)
+                    .flat_map(|i| (0..seq_len).map(move |j| if j > i { f32::NEG_INFINITY } else { 0f32 }))
+                    .collect();
+                let m = Tensor::from_slice(&mask, (seq_len, seq_len), x.device())?.to_dtype(att.dtype())?;
+                *mask_cache_guard = Some(m.clone());
+                m
+            }
+        } else {
+            let max_seq_len = self.config.seq_len;
+            let build_seq_len = seq_len.max(max_seq_len);
+            let mask: Vec<_> = (0..build_seq_len)
+                .flat_map(|i| (0..build_seq_len).map(move |j| if j > i { f32::NEG_INFINITY } else { 0f32 }))
+                .collect();
+            let m = Tensor::from_slice(&mask, (build_seq_len, build_seq_len), x.device())?.to_dtype(att.dtype())?;
+            *mask_cache_guard = Some(m.clone());
+            m.narrow(0, 0, seq_len)?.narrow(1, 0, seq_len)?
+        };
+        let mask = mask_tensor.broadcast_as(att.shape())?;
 
         let att = att.broadcast_add(&mask)?;
 

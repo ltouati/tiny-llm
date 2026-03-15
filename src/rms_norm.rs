@@ -20,7 +20,7 @@ impl Module for RmsNorm {
         // RMSNorm = x * rsqrt(mean(x^2) + eps) * weight
         let sq = x_f32.sqr()?;
         let mean_sq = sq.mean_keepdim(candle_core::D::Minus1)?;
-        let rsqrt = (mean_sq + self.eps)?.powf(-0.5)?;
+        let rsqrt = mean_sq.affine(1.0, self.eps)?.powf(-0.5)?;
         let norm_x = x_f32.broadcast_mul(&rsqrt)?;
         let out = norm_x.broadcast_mul(&self.weight.to_dtype(candle_core::DType::F32)?)?;
         out.to_dtype(dtype)
