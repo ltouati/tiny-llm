@@ -27,6 +27,7 @@ Ensure you have the Rust toolchain and the NVIDIA CUDA Toolkit (v12+) installed.
 The dynamic training loop automatically utilizes `DataLoaderBuilder` over memory mapped files natively, evaluating metrics live explicitly via the `burn::train::Learner` struct.
 
 **New Training Features:**
+*   **Custom Metrics**: Native integration of `TokensPerSecond` and `SamplesSeen` (Batch Tracker) tracking custom pipeline throughput.
 *   **Learning Rate Scheduler**: Incorporates `burn::lr_scheduler::constant::ConstantLr` explicitly injected into the optimization sweep.
 *   **Dataset Slicing**: Dynamically slice datasets statically via parameter blocks (e.g., `--dataset-percentage 10`).
 

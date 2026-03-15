@@ -163,6 +163,8 @@ impl Trainer {
         .metric_train_numeric(LossMetric::new())
         .metric_valid_numeric(LossMetric::new())
         .metric_train_numeric(LearningRateMetric::new())
+        .metric_train_numeric(crate::metrics::TokensPerSecond::new())
+        .metric_train_numeric(crate::metrics::SamplesSeen::new())
         .with_file_checkpointer(CompactRecorder::new())
         .num_epochs(max_epochs);
 

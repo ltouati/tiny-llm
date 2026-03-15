@@ -9,6 +9,8 @@ mod trainer;
 
 #[path = "train_modules/device.rs"]
 mod device;
+#[path = "train_modules/metrics.rs"]
+mod metrics;
 
 use burn::backend::{Autodiff, Cuda};
 use device::DeviceSetup;
