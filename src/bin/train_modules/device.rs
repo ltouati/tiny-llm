@@ -21,8 +21,8 @@ impl DeviceSetup {
                         let calculated_batch =
                             (available_mb_for_batches as f64 / memory_per_batch_item_mb) as usize;
 
-                        // Because BF16 graphs are smaller, we can push the hardcap to 4.
-                        batch_size = calculated_batch.clamp(1, 4);
+                        // We allow Burn to allocate up to the calculated boundary natively to fully saturate High-End GPUs like A100.
+                        batch_size = calculated_batch.max(1);
 
                         log::info!("NVML dynamically sized Target Batch to {} based on {} MB capacity ({} MB total VRAM | {} MB free VRAM detected) 🚀", batch_size, available_mb_for_batches, total_mb, free_mb);
                     }
