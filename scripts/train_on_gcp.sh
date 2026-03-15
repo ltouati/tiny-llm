@@ -85,7 +85,7 @@ else
     echo "✅ Found a cached tokenization payload in bucket. Skipping 10B generation."
 fi
 
-tar -czf source.tar.gz src/ Cargo.toml Cargo.lock build.rs config.json tokenizer.json .agent/
+tar -czf source.tar.gz src/ Cargo.toml Cargo.lock config.json tokenizer.json .agent/
 
 echo "☁️  Step 3: Uploading assets to GCP Storage..."
 gcloud storage cp source.tar.gz "$BUCKET_NAME/run/"
@@ -126,7 +126,7 @@ export TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
 if ! command -v rustc &> /dev/null; then
     echo "Installing system dependencies..."
     apt-get update -y
-    apt-get install -y build-essential curl wget pkg-config libssl-dev nvidia-cuda-toolkit
+    apt-get install -y build-essential curl wget pkg-config libssl-dev nvidia-cuda-toolkit tmux
 
     echo "Installing Rust..."
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -169,7 +169,16 @@ tar -czf target.tar.gz target/
 gcloud storage cp target.tar.gz "$BUCKET_NAME/cache/" || true
 
 echo "Running training loop..."
-./target/release/train || { echo "❌ Training loop crashed or was terminated. Proceeding to cleanup..."; }
+tmux new-session -d -s training "bash -c './target/release/train || touch /opt/tiny-llm/training_crashed'"
+
+echo "Waiting for dynamic training block to complete natively..."
+while tmux has-session -t training 2>/dev/null; do
+    sleep 30
+done
+
+if [ -f /opt/tiny-llm/training_crashed ]; then
+    echo "❌ Training loop crashed or was terminated. Proceeding to cleanup..."
+fi
 
 
 
@@ -247,8 +256,19 @@ if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
     exit 1
 fi
 
-echo "Streaming logs now:"
-gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --command="tail -f /var/log/startup-training.log" || true
+echo "Streaming logs now. To view the live graphical Terminal Dashboard inside the running VM, run: gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --command=\"tmux attach\""
+gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --command="
+    echo '⏳ Waiting for Burn backend to initialize checkpoints and experiment.log natively...'
+    while true; do
+        LATEST_LOG=\$(find /opt/tiny-llm/checkpoints_burn -name 'experiment.log' -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2)
+        if [ -n \"\$LATEST_LOG\" ]; then
+            echo \"✅ Subscribing stream dynamically to \$LATEST_LOG...\"
+            tail -n +1 -f \"\$LATEST_LOG\"
+            break
+        fi
+        sleep 5
+    done
+" || true
 
 echo "🛑 Log stream disconnected."
 
