@@ -6,14 +6,14 @@ use std::io::{BufWriter, Write};
 use tokenizers::Tokenizer;
 use tokio::sync::mpsc;
 
-use tiny_llm::Config;
+use tiny_llm::config::TinyLLMConfig;
 
 const TARGET_TOKENS: usize = 10_000_000_000;
 const OUTPUT_FILE: &str = "fineweb_edu.bin";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = Config::load_from_file("config.json").unwrap_or_default();
+    let config = TinyLLMConfig::new();
     println!("Loaded config: seq_len = {}", config.seq_len);
 
     let tokenizer = Tokenizer::from_file("tokenizer.json")

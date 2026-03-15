@@ -1,35 +1,39 @@
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor, D};
-use candle_nn::VarBuilder;
+use burn::prelude::*;
+use burn::backend::Wgpu;
+use burn::backend::wgpu::WgpuDevice;
+use burn::record::{CompactRecorder, Recorder};
+use burn::tensor::activation::softmax;
 use std::io::{self, Write};
 use tokenizers::Tokenizer;
 
-// Import our architecture from the lib.rs file
-use tiny_llm::{Config, TinyLLM};
+use tiny_llm::config::TinyLLMConfig;
+use tiny_llm::model::TinyLLM;
 
 fn main() -> Result<()> {
-    let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
-    println!("Loading model on device: {:?}", device);
+    type Backend = Wgpu;
+    let device = WgpuDevice::default();
+    println!("Loading Model Graph natively on: {:?}", device);
 
     let tokenizer =
         Tokenizer::from_file("tokenizer.json").map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-    // Scan for highest checkpoint
+    // Search for the latest Burn checkpoint generically
     let mut checkpoint_file = String::new();
-    if let Ok(entries) = std::fs::read_dir(".") {
+    let checkpoint_dir = "checkpoints_burn/checkpoint"; // Updated for Burn's native Learner schema
+    
+    if let Ok(entries) = std::fs::read_dir(checkpoint_dir) {
         let mut latest_checkpoint: Option<(usize, String)> = None;
         for entry in entries.flatten() {
             let name = entry.file_name().into_string().unwrap_or_default();
-            if name.starts_with("fineweb_checkpoint_") && name.ends_with(".safetensors") {
-                if let Ok(epoch) = name
-                    ["fineweb_checkpoint_".len()..name.len() - ".safetensors".len()]
-                    .parse::<usize>()
-                {
-                    if latest_checkpoint
-                        .as_ref()
-                        .is_none_or(|(latest, _)| epoch > *latest)
-                    {
-                        latest_checkpoint = Some((epoch, name));
+            if name.starts_with("model-") && name.ends_with(".mpk") {
+                if let Ok(epoch) = name["model-".len()..name.len() - ".mpk".len()].parse::<usize>() {
+                    if latest_checkpoint.as_ref().is_none_or(|(latest, _)| epoch > *latest) {
+                        // Re-construct the full path
+                        let path = entry.path().to_str().unwrap().to_string();
+                        // Strip the `.mpk` extension because Burn's Recorder appends it automatically during Load
+                        let path_no_ext = path.strip_suffix(".mpk").unwrap().to_string();
+                        latest_checkpoint = Some((epoch, path_no_ext));
                     }
                 }
             }
@@ -39,17 +43,16 @@ fn main() -> Result<()> {
         }
     }
 
-    if checkpoint_file.is_empty() || !std::path::Path::new(&checkpoint_file).exists() {
-        println!("Error: Could not find any fineweb_checkpoint_*.safetensors files. Have you trained the model enough to save a checkpoint yet?");
-        return Ok(());
+    let config = TinyLLMConfig::new();
+    let mut model = TinyLLM::<Backend>::new(&config, &device);
+
+    if !checkpoint_file.is_empty() {
+        println!("Loading weights natively from {}...", checkpoint_file);
+        let record = CompactRecorder::new().load(checkpoint_file.into(), &device).expect("Failed to load Record");
+        model = model.load_record(record);
+    } else {
+        println!("Warning: No checkpoints found. Running fully initialized random weights!");
     }
-
-    println!("Loading weights from {}...", checkpoint_file);
-    let vb =
-        unsafe { VarBuilder::from_mmaped_safetensors(&[checkpoint_file], DType::BF16, &device)? };
-
-    let config = Config::load_from_file("config.json").unwrap_or_default();
-    let model = TinyLLM::new(config, vb)?;
 
     let args: Vec<String> = std::env::args().collect();
     let prompt = if args.len() > 1 {
@@ -68,40 +71,39 @@ fn main() -> Result<()> {
         .to_vec();
 
     let max_tokens_to_generate = 100;
-
-    let mut start_pos = 0;
     let mut next_tokens = tokens.clone();
 
     for _ in 0..max_tokens_to_generate {
-        let input = Tensor::from_vec(next_tokens.clone(), (1, next_tokens.len()), &device)?;
-        let (logits, _) = model.forward(&input, start_pos)?;
+        let input_i32: Vec<i32> = next_tokens.iter().map(|&x| x as i32).collect();
+        let input = Tensor::<Backend, 1, Int>::from_ints(input_i32.as_slice(), &device)
+            .reshape([1, input_i32.len() as usize]);
+        
+        let logits = model.forward(input);
+        let [_batch_size, seq_len, vocab_size] = logits.dims();
 
-        let (_, seq_len, _) = logits.dims3()?;
+        // Get the very last prediction natively [1, 1, VocabSize] -> [VocabSize]
         let last_token_logits = logits
-            .narrow(1, seq_len - 1, 1)?
-            .squeeze(1)?
-            .squeeze(0)?
-            .to_dtype(DType::F32)?;
+            .slice([0..1, (seq_len - 1)..seq_len, 0..vocab_size])
+            .reshape([vocab_size as i32]);
 
-        // Temperature Sampling
-        let temperature = 0.8f64;
-        let prs = candle_nn::ops::softmax(&(last_token_logits / temperature)?, D::Minus1)?
-            .to_vec1::<f32>()?;
+        let temperature = 0.8f32;
+        let last_token_logits = last_token_logits.div_scalar(temperature);
+        let prs = softmax(last_token_logits, 0);
+
+        let prs_vec = prs.into_data().to_vec::<f32>().unwrap();
 
         let mut rng = rand::thread_rng();
-        let dist = rand::distributions::WeightedIndex::new(&prs)
+        let dist = rand::distributions::WeightedIndex::new(&prs_vec)
             .map_err(|e| anyhow::anyhow!("Sampling error: {}", e))?;
 
         use rand::distributions::Distribution;
         let next_token_id = dist.sample(&mut rng) as u32;
 
         if next_token_id == 50256 {
-            break; // Stop if it hits the <|endoftext|> token
+            break; // Stop at <|endoftext|>
         }
 
         tokens.push(next_token_id);
-
-        start_pos += next_tokens.len();
         next_tokens = vec![next_token_id];
 
         let new_word = tokenizer

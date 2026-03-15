@@ -1,39 +1,25 @@
-use serde::{Deserialize, Serialize};
+use burn::config::Config;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Config {
+#[derive(Config, Debug)]
+pub struct TinyLLMConfig {
+    #[config(default = 50257)]
     pub vocab_size: usize,
+    #[config(default = 768)]
     pub hidden_dim: usize,
+    #[config(default = 1024)]
     pub seq_len: usize,
+    #[config(default = 12)]
     pub num_layers: usize,
+    #[config(default = 12)]
     pub num_heads: usize,
+    #[config(default = 4)]
     pub num_kv_heads: usize,
+    #[config(default = 3072)]
     pub ffn_dim: usize,
 }
 
-impl Config {
-    pub fn load_from_file(path: &str) -> std::result::Result<Self, Box<dyn std::error::Error>> {
-        let file = std::fs::File::open(path)?;
-        let reader = std::io::BufReader::new(file);
-        let config = serde_json::from_reader(reader)?;
-        Ok(config)
-    }
-
+impl TinyLLMConfig {
     pub fn head_dim(&self) -> usize {
         self.hidden_dim / self.num_heads
-    }
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            vocab_size: 50257,
-            hidden_dim: 768,
-            seq_len: 1024,
-            num_layers: 12,
-            num_heads: 12,
-            num_kv_heads: 4,
-            ffn_dim: 3072,
-        }
     }
 }

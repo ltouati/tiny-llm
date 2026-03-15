@@ -4,9 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-candle-core = { version = "0.9.2", features = ["cuda"] }
-candle-nn = { version = "0.9.2", features = ["cuda"] }
-candle-flash-attn = { version = "0.9.2" }
 tokenizers = "0.19"
 hf-hub = { version = "0.3.2", features = ["tokio"] }
 anyhow = "1.0"
@@ -18,7 +15,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 reqwest = { version = "0.12", features = ["blocking", "stream"] }
 sysinfo = "0.38.3"
-cudarc = "0.19.3"
 nvml-wrapper = "0.12.0"
 axum = "0.7.5"
 tokio = { version = "1.37.0", features = ["macros", "rt-multi-thread"] }
@@ -29,6 +25,7 @@ futures = "0.3.32"
 bytes = "1.11.1"
 tensorboard-rs = "0.5.9"
 chrono = "0.4.44"
+burn = { version = "0.20.1", features = ["wgpu", "train", "dataset", "autodiff"] }
 
 [[bin]]
 name = "train"
@@ -56,6 +53,4 @@ tempfile = "3.27.0"
 [package.metadata.cargo-shear]
 ignored = ["candle-flash-attn", "bytes", "sysinfo", "cc", "tokio-stream", "futures", "cudarc"]
 
-[[bin]]
-name = "trace_memset"
-path = "src/bin/trace_memset.rs"
+

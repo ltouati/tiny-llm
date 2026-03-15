@@ -1,7 +1,10 @@
 use anyhow::Result;
 use axum::{extract::State, routing::post, Json, Router};
-use candle_core::{DType, Device, Tensor, D};
-use candle_nn::VarBuilder;
+use burn::prelude::*;
+use burn::backend::Wgpu;
+use burn::backend::wgpu::WgpuDevice;
+use burn::record::{CompactRecorder, Recorder};
+use burn::tensor::activation::{softmax, log_softmax};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs::File;
@@ -12,14 +15,21 @@ use std::sync::Arc;
 use tokenizers::Tokenizer;
 use tokio::sync::Mutex;
 
-use tiny_llm::{Config, TinyLLM};
+use tiny_llm::config::TinyLLMConfig;
+use tiny_llm::model::TinyLLM;
+
+type Backend = Wgpu;
+
+struct ModelWrapper(TinyLLM<Backend>);
+unsafe impl Send for ModelWrapper {}
+unsafe impl Sync for ModelWrapper {}
 
 #[derive(Clone)]
 struct AppState {
-    model: Arc<Mutex<TinyLLM>>,
+    model: Arc<Mutex<ModelWrapper>>,
     tokenizer: Arc<Tokenizer>,
-    config: Config,
-    device: Device,
+    config: TinyLLMConfig,
+    device: WgpuDevice,
 }
 
 #[derive(Deserialize, Debug)]
@@ -28,8 +38,8 @@ struct CompletionRequest {
     model: Option<String>,
     prompt: String,
     max_tokens: Option<usize>,
-    temperature: Option<f64>,
-    top_p: Option<f64>,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
     stop: Option<Vec<String>>,
     echo: Option<bool>,
     logprobs: Option<usize>,
@@ -70,28 +80,25 @@ async fn main() -> Result<()> {
         }
     }
 
-    let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
+    let device = WgpuDevice::default();
     println!("Evaluating model natively on device: {:?}", device);
 
     let tokenizer =
         Tokenizer::from_file("tokenizer.json").map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-    // Scan for highest checkpoint
+    // Search for the latest Burn checkpoint natively
     let mut checkpoint_file = String::new();
-    if let Ok(entries) = std::fs::read_dir(".") {
+    let checkpoint_dir = "checkpoints_burn/checkpoint";
+    if let Ok(entries) = std::fs::read_dir(checkpoint_dir) {
         let mut latest_checkpoint: Option<(usize, String)> = None;
         for entry in entries.flatten() {
             let name = entry.file_name().into_string().unwrap_or_default();
-            if name.starts_with("fineweb_checkpoint_") && name.ends_with(".safetensors") {
-                if let Ok(epoch) = name
-                    ["fineweb_checkpoint_".len()..name.len() - ".safetensors".len()]
-                    .parse::<usize>()
-                {
-                    if latest_checkpoint
-                        .as_ref()
-                        .is_none_or(|(latest, _)| epoch > *latest)
-                    {
-                        latest_checkpoint = Some((epoch, name));
+            if name.starts_with("model-") && name.ends_with(".mpk") {
+                if let Ok(epoch) = name["model-".len()..name.len() - ".mpk".len()].parse::<usize>() {
+                    if latest_checkpoint.as_ref().is_none_or(|(latest, _)| epoch > *latest) {
+                        let path = entry.path().to_str().unwrap().to_string();
+                        let path_no_ext = path.strip_suffix(".mpk").unwrap().to_string();
+                        latest_checkpoint = Some((epoch, path_no_ext));
                     }
                 }
             }
@@ -101,17 +108,16 @@ async fn main() -> Result<()> {
         }
     }
 
-    if checkpoint_file.is_empty() || !std::path::Path::new(&checkpoint_file).exists() {
-        println!("Error: Could not find any fineweb_checkpoint_*.safetensors files.");
-        return Ok(());
+    let config = TinyLLMConfig::new();
+    let mut model = TinyLLM::<Backend>::new(&config, &device);
+
+    if !checkpoint_file.is_empty() {
+        println!("Loading weights natively from {}...", checkpoint_file);
+        let record = CompactRecorder::new().load(checkpoint_file.into(), &device).expect("Failed to load Record");
+        model = model.load_record(record);
+    } else {
+        println!("Warning: No checkpoints found. Running fully initialized random weights!");
     }
-
-    println!("Loading weights from {}...", checkpoint_file);
-    let vb =
-        unsafe { VarBuilder::from_mmaped_safetensors(&[checkpoint_file], DType::BF16, &device)? };
-
-    let config = Config::load_from_file("config.json").unwrap_or_default();
-    let model = TinyLLM::new(config.clone(), vb)?;
 
     if mode == "extended" {
         run_extended_eval(model, tokenizer, config, device).await
@@ -121,13 +127,13 @@ async fn main() -> Result<()> {
 }
 
 async fn run_extended_eval(
-    model: TinyLLM,
+    model: TinyLLM<Backend>,
     tokenizer: Tokenizer,
-    config: Config,
-    device: Device,
+    config: TinyLLMConfig,
+    device: WgpuDevice,
 ) -> Result<()> {
     let state = AppState {
-        model: Arc::new(Mutex::new(model)),
+        model: Arc::new(Mutex::new(ModelWrapper(model))),
         tokenizer: Arc::new(tokenizer),
         config,
         device,
@@ -138,7 +144,7 @@ async fn run_extended_eval(
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
-    println!("Started local OpenAI API server at http://127.0.0.1:8080");
+    println!("Started local async OpenAI API server at http://127.0.0.1:8080");
 
     let _server_handle = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -210,12 +216,11 @@ async fn handle_completions_inner(
     state: AppState,
     req: Value,
 ) -> Result<CompletionResponse, anyhow::Error> {
-    // A primitive inference loop based on generate.rs
     let tokenizer = &state.tokenizer;
 
     let prompt = req["prompt"].as_str().unwrap_or("").to_string();
     let max_tokens = req["max_tokens"].as_u64().unwrap_or(16) as usize;
-    let temperature = req["temperature"].as_f64().unwrap_or(1.0);
+    let temperature = req["temperature"].as_f64().unwrap_or(1.0) as f32;
     let echo = req["echo"].as_bool().unwrap_or(false);
 
     let mut tokens = tokenizer
@@ -226,14 +231,8 @@ async fn handle_completions_inner(
 
     let mut generated_text = String::new();
 
-    // Acquire model lock
     let model = state.model.lock().await;
 
-    // For loglikelihood requests (lm-eval), it sometimes passes max_tokens=0 and echo=true.
-    // In that case it evaluates logprobs of the prompt.
-    // This simple handler mainly focuses on generative multiple choice.
-    // We will generate the max_tokens.
-    // Logprobs handling for lm-eval
     let req_logprobs = req["logprobs"].as_u64();
     let mut out_tokens = Vec::new();
     let mut out_token_logprobs = Vec::new();
@@ -242,21 +241,25 @@ async fn handle_completions_inner(
     if max_tokens > 0 {
         let mut rng = rand::thread_rng();
 
-        // If echo is true, we should include the prompt's logprobs
         if echo && req_logprobs.is_some() && !tokens.is_empty() {
-            let input = Tensor::from_vec(tokens.clone(), (1, tokens.len()), &state.device)?;
-            let (logits, _) = model.forward(&input, 0)?;
-            let logits = logits.squeeze(0)?.to_dtype(DType::F32)?;
-            let log_probs = candle_nn::ops::log_softmax(&logits, D::Minus1)?.to_vec2::<f32>()?;
+            let input_i32: Vec<i32> = tokens.iter().map(|&x| x as i32).collect();
+            let input = Tensor::<Backend, 1, Int>::from_ints(input_i32.as_slice(), &state.device)
+                .reshape([1, input_i32.len() as usize]);
+                
+            let logits = model.0.forward(input);
+            let logits = logits.squeeze::<2>(); 
+            let log_probs = log_softmax(logits, 1);
+            let log_probs_vec = log_probs.into_data().to_vec::<f32>().unwrap();
+            let vocab_size = state.config.vocab_size;
 
             for j in 0..tokens.len() {
-                let t = tokens[j];
-                out_tokens.push(tokenizer.decode(&[t], true).unwrap_or_default());
+                let t = tokens[j] as usize;
+                out_tokens.push(tokenizer.decode(&[t as u32], true).unwrap_or_default());
                 out_top_logprobs.push(std::collections::HashMap::new());
                 if j == 0 {
                     out_token_logprobs.push(0.0);
                 } else {
-                    out_token_logprobs.push(log_probs[j - 1][t as usize] as f64);
+                    out_token_logprobs.push(log_probs_vec[(j - 1) * vocab_size + t] as f64);
                 }
             }
         }
@@ -270,47 +273,41 @@ async fn handle_completions_inner(
             let start_idx = seq_len.saturating_sub(max_seq_len);
             let sliced_tokens = &tokens[start_idx..];
 
-            let input = Tensor::from_vec(
-                sliced_tokens.to_vec(),
-                (1, sliced_tokens.len()),
-                &state.device,
-            )?;
-            let (logits, _) = model.forward(&input, 0)?;
-
-            let (_, s_len, _) = logits.dims3()?;
+            let input_i32: Vec<i32> = sliced_tokens.iter().map(|&x| x as i32).collect();
+            let input = Tensor::<Backend, 1, Int>::from_ints(input_i32.as_slice(), &state.device)
+                .reshape([1, input_i32.len() as usize]);
+                
+            let logits = model.0.forward(input);
+            let [_batch_size, s_len, vocab_size] = logits.dims();
+            
             let last_token_logits = logits
-                .narrow(1, s_len - 1, 1)?
-                .squeeze(1)?
-                .squeeze(0)?
-                .to_dtype(DType::F32)?;
+                .slice([0..1, (s_len - 1)..s_len, 0..vocab_size])
+                .reshape([vocab_size as i32]);
 
             let next_token_id = if temperature < 1e-4 {
-                // Greedy
-                let last_token_logits = last_token_logits.to_vec1::<f32>()?;
-                last_token_logits
+                let logits_data = last_token_logits.clone().into_data().to_vec::<f32>().unwrap();
+                logits_data
                     .into_iter()
                     .enumerate()
                     .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
                     .unwrap()
                     .0 as u32
             } else {
-                let prs = candle_nn::ops::softmax(
-                    &(last_token_logits.clone() / temperature)?,
-                    D::Minus1,
-                )?
-                .to_vec1::<f32>()?;
+                let temperature_logits = last_token_logits.clone().div_scalar(temperature);
+                let prs = softmax(temperature_logits, 0);
+                let prs_data = prs.into_data().to_vec::<f32>().unwrap();
 
                 use rand::distributions::Distribution;
-                let dist = rand::distributions::WeightedIndex::new(&prs)?;
+                let dist = rand::distributions::WeightedIndex::new(&prs_data)?;
                 dist.sample(&mut rng) as u32
             };
 
-            // Calculate logprob of the chosen token
             if req_logprobs.is_some() {
-                let log_probs =
-                    candle_nn::ops::log_softmax(&last_token_logits, D::Minus1)?.to_vec1::<f32>()?;
+                let log_probs = log_softmax(last_token_logits.reshape([1, vocab_size as i32]), 1)
+                    .reshape([vocab_size as i32]);
+                let log_probs_data = log_probs.into_data().to_vec::<f32>().unwrap();
                 out_tokens.push(tokenizer.decode(&[next_token_id], true).unwrap_or_default());
-                out_token_logprobs.push(log_probs[next_token_id as usize] as f64);
+                out_token_logprobs.push(log_probs_data[next_token_id as usize] as f64);
                 out_top_logprobs.push(std::collections::HashMap::new());
             }
 
@@ -327,21 +324,25 @@ async fn handle_completions_inner(
     } else if echo {
         generated_text = prompt;
 
-        // purely evaluating logprobs of the prompt
         if req_logprobs.is_some() && !tokens.is_empty() {
-            let input = Tensor::from_vec(tokens.clone(), (1, tokens.len()), &state.device)?;
-            let (logits, _) = model.forward(&input, 0)?;
-            let logits = logits.squeeze(0)?.to_dtype(DType::F32)?;
-            let log_probs = candle_nn::ops::log_softmax(&logits, D::Minus1)?.to_vec2::<f32>()?;
+            let input_i32: Vec<i32> = tokens.iter().map(|&x| x as i32).collect();
+            let input = Tensor::<Backend, 1, Int>::from_ints(input_i32.as_slice(), &state.device)
+                .reshape([1, input_i32.len() as usize]);
+                
+            let logits = model.0.forward(input);
+            let logits = logits.squeeze::<2>();
+            let log_probs = log_softmax(logits, 1);
+            let log_probs_vec = log_probs.into_data().to_vec::<f32>().unwrap();
+            let vocab_size = state.config.vocab_size;
 
             for j in 0..tokens.len() {
-                let t = tokens[j];
-                out_tokens.push(tokenizer.decode(&[t], true).unwrap_or_default());
+                let t = tokens[j] as usize;
+                out_tokens.push(tokenizer.decode(&[t as u32], true).unwrap_or_default());
                 out_top_logprobs.push(std::collections::HashMap::new());
                 if j == 0 {
-                    out_token_logprobs.push(0.0); // no prior token prediction
+                    out_token_logprobs.push(0.0);
                 } else {
-                    out_token_logprobs.push(log_probs[j - 1][t as usize] as f64);
+                    out_token_logprobs.push(log_probs_vec[(j - 1) * vocab_size + t] as f64);
                 }
             }
         }
@@ -377,12 +378,11 @@ async fn handle_completions_inner(
 }
 
 async fn run_simple_eval(
-    model: TinyLLM,
+    model: TinyLLM<Backend>,
     tokenizer: Tokenizer,
-    config: Config,
-    device: Device,
+    config: TinyLLMConfig,
+    device: WgpuDevice,
 ) -> Result<()> {
-    // Download HellaSwag validation set if not exists
     let hellaswag_url =
         "https://raw.githubusercontent.com/rowanz/hellaswag/master/data/hellaswag_val.jsonl";
     let hellaswag_file = "hellaswag_val.jsonl";
@@ -402,13 +402,10 @@ async fn run_simple_eval(
 
     let mut indomain_correct = 0;
     let mut indomain_total = 0;
-
     let mut zeroshot_correct = 0;
     let mut zeroshot_total = 0;
-
     let mut activitynet_correct = 0;
     let mut activitynet_total = 0;
-
     let mut wikihow_correct = 0;
     let mut wikihow_total = 0;
 
@@ -423,7 +420,6 @@ async fn run_simple_eval(
         let source_id = v["source_id"].as_str().unwrap_or("");
         let endings = v["endings"].as_array().unwrap();
 
-        // HellaSwag labels can be numeric or strings depending on the dataset dump
         let label = match &v["label"] {
             Value::Number(n) => n.as_i64().unwrap_or(0) as usize,
             Value::String(s) => s.parse::<usize>().unwrap_or(0),
@@ -441,7 +437,6 @@ async fn run_simple_eval(
         let mut ctx_lengths = Vec::new();
         let mut ending_lengths = Vec::new();
 
-        // 1. Prepare batch padded arrays
         for ending in endings.iter() {
             let ending_str = ending.as_str().unwrap_or("");
             let pad_ending = format!(" {}", ending_str);
@@ -454,7 +449,6 @@ async fn run_simple_eval(
             let mut all_tokens = ctx_tokens.clone();
             all_tokens.extend(&ending_tokens);
 
-            // Limit to our architecture's max sequence length
             let seq_len = config.seq_len;
             let start_idx = if all_tokens.len() > seq_len {
                 all_tokens.len() - seq_len
@@ -477,47 +471,43 @@ async fn run_simple_eval(
             continue;
         }
 
-        // 2. Pad to max_len
-        let mut batched_data = Vec::new();
+        let mut batched_data_i32 = Vec::new();
         for mut tokens in batch_tokens {
             let pad_len = max_len - tokens.len();
-            tokens.extend(vec![50256; pad_len]); // pad with EOS
-            batched_data.extend(tokens);
+            tokens.extend(vec![50256; pad_len]);
+            let tokens_i32: Vec<i32> = tokens.iter().map(|&x| x as i32).collect();
+            batched_data_i32.extend(tokens_i32);
         }
 
-        // 3. Single batched forward pass representing all 4 options!
         let num_choices = endings.len();
-        let input = Tensor::from_vec(batched_data, (num_choices, max_len), &device)?;
+        let input = Tensor::<Backend, 1, Int>::from_ints(batched_data_i32.as_slice(), &device)
+            .reshape([num_choices as usize, max_len as usize]);
 
-        model.clear_kv_cache(); // Ensure KV cache starts clean for the whole batch
-        let (logits, _) = model.forward(&input, 0)?;
-
-        let logits = logits.to_dtype(DType::F32)?;
-        let log_probs = candle_nn::ops::log_softmax(&logits, D::Minus1)?;
-        let log_probs_host = log_probs.to_vec3::<f32>()?;
+        let logits = model.forward(input);
+        let log_probs = log_softmax(logits, 2);
+        let log_probs_vec = log_probs.into_data().to_vec::<f32>().unwrap();
+        
+        let vocab_size = config.vocab_size;
 
         let mut best_score = f32::NEG_INFINITY;
         let mut best_idx = 0;
 
-        // 4. Extract logs for individual choices
         for idx in 0..num_choices {
             let mut sum_log_prob = 0.0;
             let ctx_len = ctx_lengths[idx];
             let ending_len = ending_lengths[idx];
 
-            // Reconstruct sliced tokens map for target matching
-            let tokens_slice = &input.to_vec2::<u32>()?[idx];
+            let batch_offset = idx * max_len * vocab_size;
 
-            for (j, &target_token) in tokens_slice
-                .iter()
-                .enumerate()
-                .skip(ctx_len)
-                .take(ending_len)
-            {
-                if j == 0 {
-                    continue;
-                }
-                sum_log_prob += log_probs_host[idx][j - 1][target_token as usize];
+            for j in 0..ending_len {
+                if j == 0 { continue; } // Exclude the very first predicted element
+
+                let pos = ctx_len + j;
+                let target_token = batched_data_i32[idx * max_len + pos] as usize;
+                
+                // Get the logprob of the TARGET token PREDICTED AT the PREVIOUS token position (pos - 1)
+                let token_logprob_index = batch_offset + (pos - 1) * vocab_size + target_token;
+                sum_log_prob += log_probs_vec[token_logprob_index];
             }
 
             let avg_log_prob = sum_log_prob / (ending_len as f32);
@@ -530,33 +520,16 @@ async fn run_simple_eval(
 
         if best_idx == label {
             correct += 1;
-
-            if split_type == "indomain" {
-                indomain_correct += 1;
-            }
-            if split_type == "zeroshot" {
-                zeroshot_correct += 1;
-            }
-            if source_id.starts_with("activitynet") {
-                activitynet_correct += 1;
-            }
-            if source_id.starts_with("wikihow") {
-                wikihow_correct += 1;
-            }
+            if split_type == "indomain" { indomain_correct += 1; }
+            if split_type == "zeroshot" { zeroshot_correct += 1; }
+            if source_id.starts_with("activitynet") { activitynet_correct += 1; }
+            if source_id.starts_with("wikihow") { wikihow_correct += 1; }
         }
 
-        if split_type == "indomain" {
-            indomain_total += 1;
-        }
-        if split_type == "zeroshot" {
-            zeroshot_total += 1;
-        }
-        if source_id.starts_with("activitynet") {
-            activitynet_total += 1;
-        }
-        if source_id.starts_with("wikihow") {
-            wikihow_total += 1;
-        }
+        if split_type == "indomain" { indomain_total += 1; }
+        if split_type == "zeroshot" { zeroshot_total += 1; }
+        if source_id.starts_with("activitynet") { activitynet_total += 1; }
+        if source_id.starts_with("wikihow") { wikihow_total += 1; }
 
         total += 1;
 
@@ -592,11 +565,6 @@ async fn run_simple_eval(
 
     let final_acc = (correct as f32 / total as f32) * 100.0;
     println!("\nFinal HellaSwag Accuracy: {:.2}%", final_acc);
-
-    // Explicit baseline context
-    println!("\n*Note: HellaSwag consists of 4-choice multiple choice questions.");
-    println!(" A score of 25.0% represents random guessing. At this early stage of");
-    println!(" training, a low score is expected until the model learns reasoning.*");
 
     Ok(())
 }
