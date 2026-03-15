@@ -1,8 +1,7 @@
 use crate::attention::CausalSelfAttention;
-use crate::rms_norm::{rms_norm, RmsNorm};
 use crate::Config;
+use candle_nn::{rms_norm, RmsNorm, Linear, Module, VarBuilder};
 use candle_core::{Result, Tensor};
-use candle_nn::{Linear, Module, VarBuilder};
 
 pub struct Block {
     ln_1: RmsNorm,

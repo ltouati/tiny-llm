@@ -427,7 +427,7 @@ mod tests {
             lr: 0.01, // Reduce from 0.5 to prevent Infinity/NaN explosions
             global_batch_size: 2,
             batch_size: 2,
-            max_steps: 100,
+            max_steps: 150,
             start_epoch: 1,
             checkpoint_interval: 100,
             early_stopping: Some(EarlyStoppingConfig::default()),

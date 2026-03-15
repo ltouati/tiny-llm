@@ -1,8 +1,7 @@
 use crate::block::Block;
-use crate::rms_norm::{rms_norm, RmsNorm};
 use crate::Config;
 use candle_core::{Result, Tensor};
-use candle_nn::{embedding, Embedding, Linear, Module, VarBuilder};
+use candle_nn::{embedding, rms_norm, Embedding, Linear, Module, RmsNorm, VarBuilder};
 
 pub struct TinyLLM {
     wte: Embedding,
