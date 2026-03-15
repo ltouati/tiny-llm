@@ -1,10 +1,10 @@
 use anyhow::Result;
 use axum::{extract::State, routing::post, Json, Router};
+use burn::backend::cuda::CudaDevice;
+use burn::backend::Cuda;
 use burn::prelude::*;
-use burn::backend::Wgpu;
-use burn::backend::wgpu::WgpuDevice;
 use burn::record::{CompactRecorder, Recorder};
-use burn::tensor::activation::{softmax, log_softmax};
+use burn::tensor::activation::{log_softmax, softmax};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs::File;
@@ -18,7 +18,7 @@ use tokio::sync::Mutex;
 use tiny_llm::config::TinyLLMConfig;
 use tiny_llm::model::TinyLLM;
 
-type Backend = Wgpu;
+type Backend = Cuda;
 
 struct ModelWrapper(TinyLLM<Backend>);
 unsafe impl Send for ModelWrapper {}
@@ -29,7 +29,7 @@ struct AppState {
     model: Arc<Mutex<ModelWrapper>>,
     tokenizer: Arc<Tokenizer>,
     config: TinyLLMConfig,
-    device: WgpuDevice,
+    device: CudaDevice,
 }
 
 #[derive(Deserialize, Debug)]
@@ -80,7 +80,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    let device = WgpuDevice::default();
+    let device = CudaDevice::default();
     println!("Evaluating model natively on device: {:?}", device);
 
     let tokenizer =
@@ -94,8 +94,12 @@ async fn main() -> Result<()> {
         for entry in entries.flatten() {
             let name = entry.file_name().into_string().unwrap_or_default();
             if name.starts_with("model-") && name.ends_with(".mpk") {
-                if let Ok(epoch) = name["model-".len()..name.len() - ".mpk".len()].parse::<usize>() {
-                    if latest_checkpoint.as_ref().is_none_or(|(latest, _)| epoch > *latest) {
+                if let Ok(epoch) = name["model-".len()..name.len() - ".mpk".len()].parse::<usize>()
+                {
+                    if latest_checkpoint
+                        .as_ref()
+                        .is_none_or(|(latest, _)| epoch > *latest)
+                    {
                         let path = entry.path().to_str().unwrap().to_string();
                         let path_no_ext = path.strip_suffix(".mpk").unwrap().to_string();
                         latest_checkpoint = Some((epoch, path_no_ext));
@@ -113,7 +117,9 @@ async fn main() -> Result<()> {
 
     if !checkpoint_file.is_empty() {
         println!("Loading weights natively from {}...", checkpoint_file);
-        let record = CompactRecorder::new().load(checkpoint_file.into(), &device).expect("Failed to load Record");
+        let record = CompactRecorder::new()
+            .load(checkpoint_file.into(), &device)
+            .expect("Failed to load Record");
         model = model.load_record(record);
     } else {
         println!("Warning: No checkpoints found. Running fully initialized random weights!");
@@ -130,7 +136,7 @@ async fn run_extended_eval(
     model: TinyLLM<Backend>,
     tokenizer: Tokenizer,
     config: TinyLLMConfig,
-    device: WgpuDevice,
+    device: CudaDevice,
 ) -> Result<()> {
     let state = AppState {
         model: Arc::new(Mutex::new(ModelWrapper(model))),
@@ -244,10 +250,10 @@ async fn handle_completions_inner(
         if echo && req_logprobs.is_some() && !tokens.is_empty() {
             let input_i32: Vec<i32> = tokens.iter().map(|&x| x as i32).collect();
             let input = Tensor::<Backend, 1, Int>::from_ints(input_i32.as_slice(), &state.device)
-                .reshape([1, input_i32.len() as usize]);
-                
+                .reshape([1, input_i32.len()]);
+
             let logits = model.0.forward(input);
-            let logits = logits.squeeze::<2>(); 
+            let logits = logits.squeeze::<2>();
             let log_probs = log_softmax(logits, 1);
             let log_probs_vec = log_probs.into_data().to_vec::<f32>().unwrap();
             let vocab_size = state.config.vocab_size;
@@ -275,17 +281,21 @@ async fn handle_completions_inner(
 
             let input_i32: Vec<i32> = sliced_tokens.iter().map(|&x| x as i32).collect();
             let input = Tensor::<Backend, 1, Int>::from_ints(input_i32.as_slice(), &state.device)
-                .reshape([1, input_i32.len() as usize]);
-                
+                .reshape([1, input_i32.len()]);
+
             let logits = model.0.forward(input);
             let [_batch_size, s_len, vocab_size] = logits.dims();
-            
+
             let last_token_logits = logits
                 .slice([0..1, (s_len - 1)..s_len, 0..vocab_size])
                 .reshape([vocab_size as i32]);
 
             let next_token_id = if temperature < 1e-4 {
-                let logits_data = last_token_logits.clone().into_data().to_vec::<f32>().unwrap();
+                let logits_data = last_token_logits
+                    .clone()
+                    .into_data()
+                    .to_vec::<f32>()
+                    .unwrap();
                 logits_data
                     .into_iter()
                     .enumerate()
@@ -327,8 +337,8 @@ async fn handle_completions_inner(
         if req_logprobs.is_some() && !tokens.is_empty() {
             let input_i32: Vec<i32> = tokens.iter().map(|&x| x as i32).collect();
             let input = Tensor::<Backend, 1, Int>::from_ints(input_i32.as_slice(), &state.device)
-                .reshape([1, input_i32.len() as usize]);
-                
+                .reshape([1, input_i32.len()]);
+
             let logits = model.0.forward(input);
             let logits = logits.squeeze::<2>();
             let log_probs = log_softmax(logits, 1);
@@ -381,7 +391,7 @@ async fn run_simple_eval(
     model: TinyLLM<Backend>,
     tokenizer: Tokenizer,
     config: TinyLLMConfig,
-    device: WgpuDevice,
+    device: CudaDevice,
 ) -> Result<()> {
     let hellaswag_url =
         "https://raw.githubusercontent.com/rowanz/hellaswag/master/data/hellaswag_val.jsonl";
@@ -481,12 +491,12 @@ async fn run_simple_eval(
 
         let num_choices = endings.len();
         let input = Tensor::<Backend, 1, Int>::from_ints(batched_data_i32.as_slice(), &device)
-            .reshape([num_choices as usize, max_len as usize]);
+            .reshape([num_choices, max_len]);
 
         let logits = model.forward(input);
         let log_probs = log_softmax(logits, 2);
         let log_probs_vec = log_probs.into_data().to_vec::<f32>().unwrap();
-        
+
         let vocab_size = config.vocab_size;
 
         let mut best_score = f32::NEG_INFINITY;
@@ -500,11 +510,13 @@ async fn run_simple_eval(
             let batch_offset = idx * max_len * vocab_size;
 
             for j in 0..ending_len {
-                if j == 0 { continue; } // Exclude the very first predicted element
+                if j == 0 {
+                    continue;
+                } // Exclude the very first predicted element
 
                 let pos = ctx_len + j;
                 let target_token = batched_data_i32[idx * max_len + pos] as usize;
-                
+
                 // Get the logprob of the TARGET token PREDICTED AT the PREVIOUS token position (pos - 1)
                 let token_logprob_index = batch_offset + (pos - 1) * vocab_size + target_token;
                 sum_log_prob += log_probs_vec[token_logprob_index];
@@ -520,16 +532,32 @@ async fn run_simple_eval(
 
         if best_idx == label {
             correct += 1;
-            if split_type == "indomain" { indomain_correct += 1; }
-            if split_type == "zeroshot" { zeroshot_correct += 1; }
-            if source_id.starts_with("activitynet") { activitynet_correct += 1; }
-            if source_id.starts_with("wikihow") { wikihow_correct += 1; }
+            if split_type == "indomain" {
+                indomain_correct += 1;
+            }
+            if split_type == "zeroshot" {
+                zeroshot_correct += 1;
+            }
+            if source_id.starts_with("activitynet") {
+                activitynet_correct += 1;
+            }
+            if source_id.starts_with("wikihow") {
+                wikihow_correct += 1;
+            }
         }
 
-        if split_type == "indomain" { indomain_total += 1; }
-        if split_type == "zeroshot" { zeroshot_total += 1; }
-        if source_id.starts_with("activitynet") { activitynet_total += 1; }
-        if source_id.starts_with("wikihow") { wikihow_total += 1; }
+        if split_type == "indomain" {
+            indomain_total += 1;
+        }
+        if split_type == "zeroshot" {
+            zeroshot_total += 1;
+        }
+        if source_id.starts_with("activitynet") {
+            activitynet_total += 1;
+        }
+        if source_id.starts_with("wikihow") {
+            wikihow_total += 1;
+        }
 
         total += 1;
 

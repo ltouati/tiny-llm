@@ -25,7 +25,8 @@ futures = "0.3.32"
 bytes = "1.11.1"
 tensorboard-rs = "0.5.9"
 chrono = "0.4.44"
-burn = { version = "0.20.1", features = ["wgpu", "train", "dataset", "autodiff"] }
+burn = { version = "0.20.1", features = ["cuda", "train", "dataset", "autodiff", "ndarray"] }
+burn-cuda = "0.20.1"
 
 [[bin]]
 name = "train"
@@ -51,6 +52,4 @@ cc = "1.2.56"
 tempfile = "3.27.0"
 
 [package.metadata.cargo-shear]
-ignored = ["candle-flash-attn", "bytes", "sysinfo", "cc", "tokio-stream", "futures", "cudarc"]
-
-
+ignored = ["cc", "bytes", "sysinfo", "tokio-stream", "half", "futures", "burn-cuda"]

@@ -6543,6 +6543,7 @@ dependencies = [
  "anyhow",
  "axum 0.7.9",
  "burn",
+ "burn-cuda",
  "bytemuck",
  "bytes",
  "cc",

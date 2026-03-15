@@ -12,34 +12,29 @@ graph TD
         
         subgraph Attention["CausalSelfAttention"]
             direction TB
-            FlattenQ["2D Tensor Flattening"]:::layer
             Q["Q Proj\n(768 -> 768)"]:::layer
             K["K Proj\n(768 -> 256)"]:::layer
             V["V Proj\n(768 -> 256)"]:::layer
             
-            FlattenQ --> Q
-            FlattenQ --> K
-            FlattenQ --> V
+            ReshapeQ["Reshape & Head Groups"]:::layer
             
-            RoPE["Fused RoPE CustomOp"]:::custom
+            Q --> ReshapeQ
+            K --> ReshapeQ
+            V --> ReshapeQ
             
-            Q --> RoPE
-            K --> RoPE
+            RoPE["RoPE Expansion\n(Burn Math Nodes)"]:::custom
             
-            KCache["Grouped-Query\nKV Cache"]:::layer
-            RoPE --> KCache
-            V --> KCache
+            ReshapeQ --> RoPE
             
-            Flash["Flash Attention 2\n(candle-flash-attn)"]:::custom
+            Flash["Dot-Product Softmax\n(Burn Native Autotuned)"]:::custom
             
             RoPE --> Flash
-            KCache --> Flash
             
             OutProj["Out Proj\n(768 -> 768)"]:::layer
             Flash --> OutProj
         end
 
-        LN1 --> FlattenQ
+        LN1 --> Attention
         
         Add1((+)):::tensor
         
@@ -47,18 +42,17 @@ graph TD
         
         subgraph FFN["FeedForward Network"]
             direction TB
-            FlattenFFN["2D Tensor Flattening"]:::layer
             FC1["FC1 (768 -> 3072)"]:::layer
             GELU["GELU Activation"]:::layer
             FC2["FC2 (3072 -> 768)"]:::layer
-            FlattenFFN --> FC1 --> GELU --> FC2
+            FC1 --> GELU --> FC2
         end
 
         Add2((+)):::tensor
         
         Attention --> Add1
         Add1 --> LN2
-        LN2 --> FlattenFFN
+        LN2 --> FFN
         FFN --> Add2
     end
 
@@ -71,9 +65,9 @@ graph TD
     subgraph LMHead["Language Modeling Head"]
         direction TB
         LMLinear["LM Head Linear\n(768 -> 50257)"]:::layer
-        Loss["FusedCrossEntropy PTX Kernel\n(CustomOp1: Fwd + Manual Autograd Bwd)"]:::custom
+        Loss["CrossEntropyLossConfig\n(Burn Autodiff Graph Tree)"]:::custom
         
-        LMLinear -->|Native BF16| Loss
+        LMLinear --> Loss
     end
 
     LNFinal --> LMLinear

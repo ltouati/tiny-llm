@@ -1,7 +1,7 @@
 use crate::attention::CausalSelfAttention;
 use crate::config::TinyLLMConfig;
+use burn::nn::{LayerNorm, LayerNormConfig, Linear, LinearConfig};
 use burn::prelude::*;
-use burn::nn::{Linear, LinearConfig, LayerNorm, LayerNormConfig};
 use burn::tensor::activation::gelu;
 
 #[derive(Module, Debug)]
@@ -19,8 +19,12 @@ impl<B: Backend> Block<B> {
             ln_1: LayerNormConfig::new(config.hidden_dim).init(device),
             attn: CausalSelfAttention::new(config, device),
             ln_2: LayerNormConfig::new(config.hidden_dim).init(device),
-            mlp_fc1: LinearConfig::new(config.hidden_dim, config.ffn_dim).with_bias(false).init(device),
-            mlp_fc2: LinearConfig::new(config.ffn_dim, config.hidden_dim).with_bias(false).init(device),
+            mlp_fc1: LinearConfig::new(config.hidden_dim, config.ffn_dim)
+                .with_bias(false)
+                .init(device),
+            mlp_fc2: LinearConfig::new(config.ffn_dim, config.hidden_dim)
+                .with_bias(false)
+                .init(device),
         }
     }
 
@@ -33,5 +37,25 @@ impl<B: Backend> Block<B> {
         let mlp_out = self.mlp_fc2.forward(mlp_fc1_out);
 
         x_add + mlp_out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use burn::backend::NdArray;
+
+    type B = NdArray;
+
+    #[test]
+    fn test_block_shapes() {
+        let device = Default::default();
+        let config = TinyLLMConfig::new();
+        let block = Block::<B>::new(&config, &device);
+
+        let x = Tensor::<B, 3>::zeros([2, 16, config.hidden_dim], &device);
+        let output = block.forward(x);
+
+        assert_eq!(output.dims(), [2, 16, config.hidden_dim]);
     }
 }

@@ -1,6 +1,5 @@
 use anyhow::Result;
-use burn::backend::{Autodiff, Wgpu};
-use burn::backend::wgpu::WgpuDevice;
+use burn::backend::cuda::CudaDevice;
 use tiny_llm::config::TinyLLMConfig;
 
 #[path = "train_modules/dataset.rs"]
@@ -8,15 +7,20 @@ mod dataset;
 #[path = "train_modules/trainer.rs"]
 mod trainer;
 
+#[path = "train_modules/device.rs"]
+mod device;
+
+use burn::backend::{Autodiff, Cuda};
+use device::DeviceSetup;
 use trainer::Trainer;
 
 // Define the precise backend type structurally
-type MyBackend = Wgpu;
+type MyBackend = Cuda;
 type MyAutodiffBackend = Autodiff<MyBackend>;
 
 fn main() -> Result<()> {
-    let device = WgpuDevice::default();
-    println!("Training natively using Burn WGPU backend on: {:?}", device);
+    let device = CudaDevice::default();
+    println!("Training natively using Burn CUDA backend on: {:?}", device);
 
     // Initializing Burn's built-in derived Config natively
     let config = TinyLLMConfig::new();
@@ -44,13 +48,20 @@ fn main() -> Result<()> {
     let output_dir = format!("{}/{}", output_dir_base, timestamp);
     println!("Burn Configured output directory: {}", output_dir);
 
-    // Launch the static Burn Learner Builder natively
+    let auto_batch_size = DeviceSetup::calculate_batch_size(&device);
+    let auto_gradient_accumulation = (64 / auto_batch_size).max(1);
+    println!(
+        "NVML configured Gradient Accumulation tightly to {} to reach 64 macro-batch equivalence.",
+        auto_gradient_accumulation
+    );
+
     Trainer::train::<MyAutodiffBackend>(
         config,
         device,
         "fineweb_edu.bin",
         dataset_percentage,
-        64, // Batch size
+        auto_batch_size,
+        auto_gradient_accumulation,
         10, // Max epochs
         &output_dir,
     );

@@ -1,7 +1,7 @@
 use anyhow::Result;
+use burn::backend::cuda::CudaDevice;
+use burn::backend::Cuda;
 use burn::prelude::*;
-use burn::backend::Wgpu;
-use burn::backend::wgpu::WgpuDevice;
 use burn::record::{CompactRecorder, Recorder};
 use burn::tensor::activation::softmax;
 use std::io::{self, Write};
@@ -11,8 +11,8 @@ use tiny_llm::config::TinyLLMConfig;
 use tiny_llm::model::TinyLLM;
 
 fn main() -> Result<()> {
-    type Backend = Wgpu;
-    let device = WgpuDevice::default();
+    type Backend = Cuda;
+    let device = CudaDevice::default();
     println!("Loading Model Graph natively on: {:?}", device);
 
     let tokenizer =
@@ -21,14 +21,18 @@ fn main() -> Result<()> {
     // Search for the latest Burn checkpoint generically
     let mut checkpoint_file = String::new();
     let checkpoint_dir = "checkpoints_burn/checkpoint"; // Updated for Burn's native Learner schema
-    
+
     if let Ok(entries) = std::fs::read_dir(checkpoint_dir) {
         let mut latest_checkpoint: Option<(usize, String)> = None;
         for entry in entries.flatten() {
             let name = entry.file_name().into_string().unwrap_or_default();
             if name.starts_with("model-") && name.ends_with(".mpk") {
-                if let Ok(epoch) = name["model-".len()..name.len() - ".mpk".len()].parse::<usize>() {
-                    if latest_checkpoint.as_ref().is_none_or(|(latest, _)| epoch > *latest) {
+                if let Ok(epoch) = name["model-".len()..name.len() - ".mpk".len()].parse::<usize>()
+                {
+                    if latest_checkpoint
+                        .as_ref()
+                        .is_none_or(|(latest, _)| epoch > *latest)
+                    {
                         // Re-construct the full path
                         let path = entry.path().to_str().unwrap().to_string();
                         // Strip the `.mpk` extension because Burn's Recorder appends it automatically during Load
@@ -48,7 +52,9 @@ fn main() -> Result<()> {
 
     if !checkpoint_file.is_empty() {
         println!("Loading weights natively from {}...", checkpoint_file);
-        let record = CompactRecorder::new().load(checkpoint_file.into(), &device).expect("Failed to load Record");
+        let record = CompactRecorder::new()
+            .load(checkpoint_file.into(), &device)
+            .expect("Failed to load Record");
         model = model.load_record(record);
     } else {
         println!("Warning: No checkpoints found. Running fully initialized random weights!");
@@ -77,7 +83,7 @@ fn main() -> Result<()> {
         let input_i32: Vec<i32> = next_tokens.iter().map(|&x| x as i32).collect();
         let input = Tensor::<Backend, 1, Int>::from_ints(input_i32.as_slice(), &device)
             .reshape([1, input_i32.len() as usize]);
-        
+
         let logits = model.forward(input);
         let [_batch_size, seq_len, vocab_size] = logits.dims();
 

@@ -1,7 +1,7 @@
 use crate::block::Block;
 use crate::config::TinyLLMConfig;
+use burn::nn::{Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig};
 use burn::prelude::*;
-use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, LayerNorm, LayerNormConfig};
 
 #[derive(Module, Debug)]
 pub struct TinyLLM<B: Backend> {
@@ -21,7 +21,9 @@ impl<B: Backend> TinyLLM<B> {
             wte: EmbeddingConfig::new(config.vocab_size, config.hidden_dim).init(device),
             blocks,
             ln_f: LayerNormConfig::new(config.hidden_dim).init(device),
-            lm_head: LinearConfig::new(config.hidden_dim, config.vocab_size).with_bias(false).init(device),
+            lm_head: LinearConfig::new(config.hidden_dim, config.vocab_size)
+                .with_bias(false)
+                .init(device),
         }
     }
 
@@ -34,5 +36,26 @@ impl<B: Backend> TinyLLM<B> {
 
         let out = self.ln_f.forward(out);
         self.lm_head.forward(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use burn::backend::NdArray;
+
+    type B = NdArray;
+
+    #[test]
+    fn test_model_shapes() {
+        let device = Default::default();
+        let config = TinyLLMConfig::new();
+        let model = TinyLLM::<B>::new(&config, &device);
+
+        // Int tensor input representing 2 samples of 16 tokens
+        let x = Tensor::<B, 2, Int>::zeros([2, 16], &device);
+        let output = model.forward(x);
+
+        assert_eq!(output.dims(), [2, 16, config.vocab_size]);
     }
 }
