@@ -6,8 +6,8 @@ ZONE="us-central1-f"
 
 echo "🔍 Querying remote VM '$INSTANCE_NAME' for the latest checkpoint..."
 
-# Get the latest checkpoint filename
-LATEST_CHECKPOINT=$(gcloud compute ssh "$INSTANCE_NAME" --zone="$ZONE" --command="ls -t /opt/tiny-llm/*.safetensors | head -n 1" 2>/dev/null | tr -d '\r')
+# Get the latest checkpoint filename recursively from checkpoints_burn
+LATEST_CHECKPOINT=$(gcloud compute ssh "$INSTANCE_NAME" --zone="$ZONE" --command="find /opt/tiny-llm/checkpoints_burn -name '*.safetensors' -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2" 2>/dev/null | tr -d '\r')
 
 if [ -z "$LATEST_CHECKPOINT" ]; then
     echo "❌ No checkpoints found on the remote VM. Is the training running?"
@@ -17,8 +17,9 @@ fi
 FILENAME=$(basename "$LATEST_CHECKPOINT")
 echo "✅ Found latest checkpoint: $FILENAME"
 
-echo "📥 Downloading $FILENAME from VM..."
-gcloud compute scp "$INSTANCE_NAME:$LATEST_CHECKPOINT" . --zone="$ZONE" --quiet
+echo "📥 Downloading $FILENAME from VM into local checkpoints_burn directory..."
+mkdir -p checkpoints_burn
+gcloud compute scp "$INSTANCE_NAME:$LATEST_CHECKPOINT" "./checkpoints_burn/$FILENAME" --zone="$ZONE" --quiet
 
 echo "✅ Download complete! Passing to local Evaluator..."
 echo "---------------------------------------------------"
