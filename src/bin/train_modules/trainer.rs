@@ -1,7 +1,12 @@
 use crate::dataset::{TextItem, TinyLLMDataset};
 use burn::data::dataloader::batcher::Batcher;
 use burn::data::dataloader::DataLoaderBuilder;
-use burn::lr_scheduler::constant::ConstantLr;
+use burn::data::dataset::Dataset;
+use burn::lr_scheduler::{
+    composed::{ComposedLrSchedulerConfig, SchedulerReduction},
+    cosine::CosineAnnealingLrSchedulerConfig,
+    linear::LinearLrSchedulerConfig,
+};
 use burn::optim::AdamWConfig;
 use burn::prelude::*;
 use burn::record::CompactRecorder;
@@ -139,7 +144,7 @@ impl Trainer {
         let dataloader_valid = DataLoaderBuilder::new(valid_batcher)
             .batch_size(batch_size)
             .num_workers(4)
-            .build(dataset);
+            .build(dataset.clone());
 
         let optim = AdamWConfig::new()
             .with_weight_decay(0.1)
@@ -147,7 +152,21 @@ impl Trainer {
             .with_beta_1(0.9)
             .with_beta_2(0.95);
 
-        let lr_scheduler = ConstantLr::new(6e-4);
+        let actual_global_batch_size = batch_size * gradient_accumulation_steps;
+        let base_batch = 8.0;
+        let max_lr = 6e-4 * (actual_global_batch_size as f64 / base_batch).sqrt();
+        let min_lr = max_lr * 0.1;
+
+        let len_dataloader = dataset.len() / batch_size;
+        let total_steps = max_epochs * len_dataloader / gradient_accumulation_steps;
+        let warmup_steps = (total_steps as f64 * 0.1) as usize;
+
+        let lr_scheduler = ComposedLrSchedulerConfig::new()
+            .with_reduction(SchedulerReduction::Prod)
+            .linear(LinearLrSchedulerConfig::new(1e-6, 1.0, warmup_steps.max(1)))
+            .cosine(CosineAnnealingLrSchedulerConfig::new(max_lr, total_steps).with_min_lr(min_lr))
+            .init()
+            .unwrap();
 
         let model = TinyLLM::new(&config, &device);
         let trainable = TrainableTinyLLM::new(model);

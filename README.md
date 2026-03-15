@@ -28,7 +28,8 @@ The dynamic training loop automatically utilizes `DataLoaderBuilder` over memory
 
 **New Training Features:**
 *   **Custom Metrics**: Native integration of `TokensPerSecond` and `SamplesSeen` (Batch Tracker) tracking custom pipeline throughput.
-*   **Learning Rate Scheduler**: Incorporates `burn::lr_scheduler::constant::ConstantLr` explicitly injected into the optimization sweep.
+*   **BF16 Precision & Fused Operations**: Native graphs automatically compile and execute wrapped natively under `burn_fusion` using `Cuda<half::bf16, i32>` precision, inherently slashing VRAM bounds natively.
+*   **Learning Rate Scheduler**: Incorporates `burn::lr_scheduler::composed::ComposedLrScheduler` multiplying native `Linear` warmup sweeps cleanly against `CosineAnnealing` bounds dynamically throughout training iterations.
 *   **Dataset Slicing**: Dynamically slice datasets statically via parameter blocks (e.g., `--dataset-percentage 10`).
 
 ```bash

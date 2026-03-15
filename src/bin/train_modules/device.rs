@@ -15,15 +15,14 @@ impl DeviceSetup {
                     let reserved_mb = 4000; // Leave 4GB for OS, CUDA context, and Burn Autotune workspace overhead
                     if free_mb > reserved_mb {
                         let available_mb_for_batches = free_mb - reserved_mb;
-                        // Heuristic: A 12-layer 70M model at 1024 context window requires far less memory per batch item.
-                        // We safely bound it to ~4000 MB per batch item to maintain high memory utilization.
-                        let memory_per_batch_item_mb = 4000.0;
+                        // Heuristic: Using BF16 mixed-precision halves the VRAM demand for weights/activations.
+                        // We safely bound it to ~2000 MB per batch item to maintain high memory utilization.
+                        let memory_per_batch_item_mb = 2000.0;
                         let calculated_batch =
                             (available_mb_for_batches as f64 / memory_per_batch_item_mb) as usize;
 
-                        // For optimal cuBLAS kernel selection and to avoid insane workspace sizes,
-                        // we strictly enforce that the batch size is capped aggressively to 1 or 2 for PyTorch-like memory profiles
-                        batch_size = calculated_batch.clamp(1, 2); // Hardcap at 2 for 8GB VRAM cards to prevent backward pass OOM
+                        // Because BF16 graphs are smaller, we can push the hardcap to 4.
+                        batch_size = calculated_batch.clamp(1, 4);
 
                         println!("NVML dynamically sized Target Batch to {} based on {} MB capacity ({} MB total VRAM | {} MB free VRAM detected) 🚀", batch_size, available_mb_for_batches, total_mb, free_mb);
                     }

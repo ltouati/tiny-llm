@@ -16,8 +16,8 @@ use burn::backend::{Autodiff, Cuda};
 use device::DeviceSetup;
 use trainer::Trainer;
 
-// Define the precise backend type structurally
-type MyBackend = Cuda;
+// Define the precise backend type structurally (using BF16 for math)
+type MyBackend = Cuda<half::bf16, i32>;
 type MyAutodiffBackend = Autodiff<MyBackend>;
 
 fn main() -> Result<()> {

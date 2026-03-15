@@ -25,7 +25,7 @@ futures = "0.3.32"
 bytes = "1.11.1"
 tensorboard-rs = "0.5.9"
 chrono = "0.4.44"
-burn = { version = "0.20.1", features = ["cuda", "train", "dataset", "autodiff", "ndarray"] }
+burn = { version = "0.20.1", features = ["cuda", "train", "dataset", "autodiff", "ndarray", "fusion"] }
 burn-cuda = "0.20.1"
 
 [[bin]]
