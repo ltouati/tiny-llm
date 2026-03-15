@@ -9,8 +9,39 @@ if [ $? -ne 0 ]; then
 fi
 
 echo "Running cargo clippy and applying automatic fixes..."
-# We use --allow-dirty and --allow-no-vcs so clippy can operate freely outside of hard git commits
-cargo clippy --fix --allow-dirty --allow-no-vcs
+#!/bin/bash
+set -eu
+
+
+echo "clippy"
+
+if result=$(cargo clippy --all-targets --all --all-features -- -D warnings); then
+    echo " OK"
+else
+    echo " FAIL"
+    echo " $result"
+    exit 1
+fi
+
+echo "fmt"
+
+if result=$(cargo fmt --check); then
+    echo " OK"
+else
+    echo " FAIL"
+    echo " $result"
+    exit 1
+fi
+
+echo "shear"
+
+if result=$(cargo  shear); then
+    echo " OK"
+else
+    echo " FAIL"
+    echo " $result"
+    exit 1
+fi
 
 echo "=========================================="
 echo "Linting and formatting complete!"

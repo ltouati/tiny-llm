@@ -22,7 +22,7 @@ $SCRIPT_DIR/compute_gpu_limit > "$OUT_DIR/limit_output.txt"
 cat "$OUT_DIR/limit_output.txt"
 
 echo "[Phase 2]: Setting MAX_STEPS=5 for iteration profiling..."
-export MAX_STEPS=5
+export MAX_STEPS=1
 
 echo "Gathering memory transfer overhead with nsys (`cargo run`)..."
 nsys profile -t cuda,nvtx -o "$OUT_DIR/auto_optimize_profile" --force-overwrite true cargo run --release --bin train

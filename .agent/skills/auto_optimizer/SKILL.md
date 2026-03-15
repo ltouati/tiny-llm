@@ -21,7 +21,8 @@ This skill automates an iterative performance tuning loop designed to push the l
    - Profile the run using `nsys` (nperf).
    - Analyze the `nsys` output specifically targeting host-to-device (H2D) and device-to-host (D2H) memory transfers.
    - Propose and implement code changes in the Rust training pipeline or FFI CUDA kernels to drastically eliminate these memory transfers (e.g., using in-place operations or bypassing allocations).
-   - **If the changes result in a performance improvement, create a git commit that describes the modifications and the newly obtained results (e.g. `tokens/s` improvement).**
+   - Runs `cargo test` to validate the changes. If the test don't pass, please stop the iteration and report the error.
+   - **If the changes result in a performance improvement, and the tests pass, create a git commit that describes the modifications and the newly obtained results (e.g. `tokens/s` improvement).**
    - Stop iterating if the evaluated metrics (`tokens/s`) hit at least 75% of the calculated GPU theoretical limit.
 
 ## How to use this skill
@@ -33,4 +34,4 @@ This skill automates an iterative performance tuning loop designed to push the l
 2.  **Agent Action**:
     - The script will pause or output instructions after each profiling step. 
     - You MUST read the `.sqlite` or `.nsys-rep` statistics using `nsys stats` or read the generated `profile_report.txt`.
-    - Analyze the memory transfers, implement optimizations in the source code, compile, and run the next iteration until the 75% threshold is crossed or 10 iterations map out.
+    - Analyze the memory transfers, implement optimizations in the source code, compile, run tests and run the next iteration until the 75% threshold is crossed or 10 iterations map out. If during an iteration, the tests don't pass, please stop the iteration and report the error.
