@@ -45,14 +45,15 @@ impl CausalSelfAttention {
     pub fn forward(&self, x: &Tensor, start_pos: usize) -> Result<Tensor> {
         let (b_sz, seq_len, _) = x.dims3()?;
 
+        let x_flat = x.flatten_to(1)?;
         // flash_attn expects inputs in [batch, seq_len, num_heads, head_dim] format
-        let q = self.q_proj.forward(x)?.reshape((
+        let q = self.q_proj.forward(&x_flat)?.reshape((
             b_sz,
             seq_len,
             self.config.num_heads,
             self.config.head_dim(),
         ))?;
-        let k = self.k_proj.forward(x)?.reshape((
+        let k = self.k_proj.forward(&x_flat)?.reshape((
             b_sz,
             seq_len,
             self.config.num_kv_heads,
@@ -73,7 +74,7 @@ impl CausalSelfAttention {
         let q = q.contiguous()?.apply_op1(rope_q)?;
         let mut k = k.contiguous()?.apply_op1(rope_k)?;
 
-        let mut v = self.v_proj.forward(x)?.reshape((
+        let mut v = self.v_proj.forward(&x_flat)?.reshape((
             b_sz,
             seq_len,
             self.config.num_kv_heads,
@@ -161,9 +162,7 @@ impl CausalSelfAttention {
         let att = att.broadcast_add(&mask)?;
 
         // Custom Softmax implementation to preserve gradients natively!
-        let att_exp = att.exp()?;
-        let att_sum = att_exp.sum_keepdim(candle_core::D::Minus1)?;
-        let att = att_exp.broadcast_div(&att_sum)?;
+        let att = candle_nn::ops::softmax(&att, candle_core::D::Minus1)?;
 
         let y = att.matmul(&v_expand)?; // [b_sz, num_heads, seq_len, head_dim]
 

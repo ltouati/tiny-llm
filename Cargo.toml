@@ -55,3 +55,7 @@ tempfile = "3.27.0"
 
 [package.metadata.cargo-shear]
 ignored = ["candle-flash-attn", "bytes", "sysinfo", "cc", "tokio-stream", "futures", "cudarc"]
+
+[[bin]]
+name = "trace_memset"
+path = "src/bin/trace_memset.rs"

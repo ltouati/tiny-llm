@@ -33,9 +33,12 @@ impl Block {
         let attn_out = self.attn.forward(&self.ln_1.forward(x)?, start_pos)?;
         let x_add = x.broadcast_add(&attn_out)?;
 
-        let mlp_out = self
-            .mlp_fc2
-            .forward(&self.mlp_fc1.forward(&self.ln_2.forward(&x_add)?)?.gelu()?)?;
+        let ln_2_out = self.ln_2.forward(&x_add)?;
+        let ln_2_flat = ln_2_out.flatten_to(1)?;
+        
+        let mlp_fc1_out = self.mlp_fc1.forward(&ln_2_flat)?.gelu()?;
+        let mlp_fc2_out = self.mlp_fc2.forward(&mlp_fc1_out)?;
+        let mlp_out = mlp_fc2_out.reshape(x_add.shape())?;
 
         let out = x_add.broadcast_add(&mlp_out)?;
         Ok(out)
