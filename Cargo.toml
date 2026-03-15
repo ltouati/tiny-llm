@@ -27,6 +27,8 @@ tensorboard-rs = "0.5.9"
 chrono = "0.4.44"
 burn = { version = "0.20.1", features = ["cuda", "train", "dataset", "autodiff", "ndarray", "fusion"] }
 burn-cuda = "0.20.1"
+burn-store = { version = "0.20.1", default-features = false, features = ["safetensors", "std"] }
+log = { version = "0.4.29", default-features = false }
 
 [[bin]]
 name = "train"

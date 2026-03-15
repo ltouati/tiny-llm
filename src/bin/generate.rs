@@ -2,8 +2,9 @@ use anyhow::Result;
 use burn::backend::cuda::CudaDevice;
 use burn::backend::Cuda;
 use burn::prelude::*;
-use burn::record::{CompactRecorder, Recorder};
+
 use burn::tensor::activation::softmax;
+use burn_store::{ModuleSnapshot, SafetensorsStore};
 use std::io::{self, Write};
 use tokenizers::Tokenizer;
 
@@ -11,33 +12,60 @@ use tiny_llm::config::TinyLLMConfig;
 use tiny_llm::model::TinyLLM;
 
 fn main() -> Result<()> {
-    type Backend = Cuda;
+    type Backend = Cuda<half::bf16, i32>;
     let device = CudaDevice::default();
-    println!("Loading Model Graph natively on: {:?}", device);
+    log::info!("Loading Model Graph natively on: {:?}", device);
 
     let tokenizer =
         Tokenizer::from_file("tokenizer.json").map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
     // Search for the latest Burn checkpoint generically
     let mut checkpoint_file = String::new();
-    let checkpoint_dir = "checkpoints_burn/checkpoint"; // Updated for Burn's native Learner schema
+    let root_dir = "checkpoints_burn";
 
-    if let Ok(entries) = std::fs::read_dir(checkpoint_dir) {
-        let mut latest_checkpoint: Option<(usize, String)> = None;
-        for entry in entries.flatten() {
-            let name = entry.file_name().into_string().unwrap_or_default();
-            if name.starts_with("model-") && name.ends_with(".mpk") {
-                if let Ok(epoch) = name["model-".len()..name.len() - ".mpk".len()].parse::<usize>()
-                {
-                    if latest_checkpoint
-                        .as_ref()
-                        .is_none_or(|(latest, _)| epoch > *latest)
-                    {
-                        // Re-construct the full path
-                        let path = entry.path().to_str().unwrap().to_string();
-                        // Strip the `.mpk` extension because Burn's Recorder appends it automatically during Load
-                        let path_no_ext = path.strip_suffix(".mpk").unwrap().to_string();
-                        latest_checkpoint = Some((epoch, path_no_ext));
+    if let Ok(run_dirs) = std::fs::read_dir(root_dir) {
+        let mut latest_checkpoint: Option<(std::time::SystemTime, String)> = None;
+
+        for run_dir_entry in run_dirs.flatten() {
+            let run_dir = run_dir_entry.path();
+            if run_dir.is_dir() {
+                if let Ok(step_dirs) = std::fs::read_dir(&run_dir) {
+                    for step_dir_entry in step_dirs.flatten() {
+                        let step_dir = step_dir_entry.path();
+                        if step_dir.is_dir() {
+                            let safetensors_path = step_dir.join("model.safetensors");
+                            if safetensors_path.exists() {
+                                if let Ok(metadata) = std::fs::metadata(&safetensors_path) {
+                                    if let Ok(modified) = metadata.modified() {
+                                        if latest_checkpoint
+                                            .as_ref()
+                                            .is_none_or(|(latest, _)| modified > *latest)
+                                        {
+                                            latest_checkpoint = Some((
+                                                modified,
+                                                safetensors_path.to_str().unwrap().to_string(),
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        } else if step_dir.is_file()
+                            && step_dir.extension().is_some_and(|ext| ext == "safetensors")
+                        {
+                            if let Ok(metadata) = std::fs::metadata(&step_dir) {
+                                if let Ok(modified) = metadata.modified() {
+                                    if latest_checkpoint
+                                        .as_ref()
+                                        .is_none_or(|(latest, _)| modified > *latest)
+                                    {
+                                        latest_checkpoint = Some((
+                                            modified,
+                                            step_dir.to_str().unwrap().to_string(),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -47,17 +75,18 @@ fn main() -> Result<()> {
         }
     }
 
-    let config = TinyLLMConfig::new();
+    let config = TinyLLMConfig::load("config.json").unwrap_or_else(|_| TinyLLMConfig::new());
     let mut model = TinyLLM::<Backend>::new(&config, &device);
 
     if !checkpoint_file.is_empty() {
-        println!("Loading weights natively from {}...", checkpoint_file);
-        let record = CompactRecorder::new()
-            .load(checkpoint_file.into(), &device)
-            .expect("Failed to load Record");
-        model = model.load_record(record);
+        log::info!("Loading weights natively from {}...", checkpoint_file);
+        let mut store = SafetensorsStore::from_file(&checkpoint_file);
+        // Safetensors load
+        model
+            .load_from(&mut store)
+            .expect("Failed to parse Safetensors natively");
     } else {
-        println!("Warning: No checkpoints found. Running fully initialized random weights!");
+        log::info!("Warning: No checkpoints found. Running fully initialized random weights!");
     }
 
     let args: Vec<String> = std::env::args().collect();
@@ -96,7 +125,7 @@ fn main() -> Result<()> {
         let last_token_logits = last_token_logits.div_scalar(temperature);
         let prs = softmax(last_token_logits, 0);
 
-        let prs_vec = prs.into_data().to_vec::<f32>().unwrap();
+        let prs_vec = prs.into_data().convert::<f32>().to_vec::<f32>().unwrap();
 
         let mut rng = rand::thread_rng();
         let dist = rand::distributions::WeightedIndex::new(&prs_vec)
@@ -120,6 +149,6 @@ fn main() -> Result<()> {
         io::stdout().flush()?;
     }
 
-    println!("\n\n[Generation complete]");
+    log::info!("\n\n[Generation complete]");
     Ok(())
 }

@@ -18,7 +18,7 @@ use tokio::sync::Mutex;
 use tiny_llm::config::TinyLLMConfig;
 use tiny_llm::model::TinyLLM;
 
-type Backend = Cuda;
+type Backend = Cuda<half::bf16, i32>;
 
 struct ModelWrapper(TinyLLM<Backend>);
 unsafe impl Send for ModelWrapper {}
@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
     }
 
     let device = CudaDevice::default();
-    println!("Evaluating model natively on device: {:?}", device);
+    log::info!("Evaluating model natively on device: {:?}", device);
 
     let tokenizer =
         Tokenizer::from_file("tokenizer.json").map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -112,17 +112,17 @@ async fn main() -> Result<()> {
         }
     }
 
-    let config = TinyLLMConfig::new();
+    let config = TinyLLMConfig::load("config.json").unwrap_or_else(|_| TinyLLMConfig::new());
     let mut model = TinyLLM::<Backend>::new(&config, &device);
 
     if !checkpoint_file.is_empty() {
-        println!("Loading weights natively from {}...", checkpoint_file);
+        log::info!("Loading weights natively from {}...", checkpoint_file);
         let record = CompactRecorder::new()
             .load(checkpoint_file.into(), &device)
             .expect("Failed to load Record");
         model = model.load_record(record);
     } else {
-        println!("Warning: No checkpoints found. Running fully initialized random weights!");
+        log::info!("Warning: No checkpoints found. Running fully initialized random weights!");
     }
 
     if mode == "extended" {
@@ -150,7 +150,7 @@ async fn run_extended_eval(
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
-    println!("Started local async OpenAI API server at http://127.0.0.1:8080");
+    log::info!("Started local async OpenAI API server at http://127.0.0.1:8080");
 
     let _server_handle = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -158,7 +158,7 @@ async fn run_extended_eval(
 
     let venv_dir = ".lm_eval_env";
     if !Path::new(venv_dir).exists() {
-        println!("Creating Python virtual environment in {}...", venv_dir);
+        log::info!("Creating Python virtual environment in {}...", venv_dir);
         let status = Command::new("python3")
             .args(["-m", "venv", venv_dir])
             .status()?;
@@ -166,7 +166,7 @@ async fn run_extended_eval(
             anyhow::bail!("Failed to create virtual environment");
         }
 
-        println!("Installing lm-eval[api] and transformers...");
+        log::info!("Installing lm-eval[api] and transformers...");
         let pip_path = format!("{}/bin/pip", venv_dir);
         let status = Command::new(&pip_path)
             .args([
@@ -181,7 +181,7 @@ async fn run_extended_eval(
         }
     }
 
-    println!("Running lm-eval...");
+    log::info!("Running lm-eval...");
     let lm_eval_path = format!("{}/bin/lm_eval", venv_dir);
     let mut child = Command::new(&lm_eval_path)
         .args([
@@ -197,7 +197,7 @@ async fn run_extended_eval(
 
     child.wait()?;
 
-    println!("Evaluation complete! Shutting down server.");
+    log::info!("Evaluation complete! Shutting down server.");
     std::process::exit(0);
 }
 
@@ -209,7 +209,7 @@ async fn handle_completions(
     match result {
         Ok(res) => axum::response::IntoResponse::into_response(Json(res)),
         Err(e) => {
-            println!("Server Error: {:?}", e);
+            log::info!("Server Error: {:?}", e);
             axum::response::IntoResponse::into_response((
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 e.to_string(),
@@ -255,7 +255,11 @@ async fn handle_completions_inner(
             let logits = model.0.forward(input);
             let logits = logits.squeeze::<2>();
             let log_probs = log_softmax(logits, 1);
-            let log_probs_vec = log_probs.into_data().to_vec::<f32>().unwrap();
+            let log_probs_vec = log_probs
+                .into_data()
+                .convert::<f32>()
+                .to_vec::<f32>()
+                .unwrap();
             let vocab_size = state.config.vocab_size;
 
             for j in 0..tokens.len() {
@@ -294,6 +298,7 @@ async fn handle_completions_inner(
                 let logits_data = last_token_logits
                     .clone()
                     .into_data()
+                    .convert::<f32>()
                     .to_vec::<f32>()
                     .unwrap();
                 logits_data
@@ -305,7 +310,7 @@ async fn handle_completions_inner(
             } else {
                 let temperature_logits = last_token_logits.clone().div_scalar(temperature);
                 let prs = softmax(temperature_logits, 0);
-                let prs_data = prs.into_data().to_vec::<f32>().unwrap();
+                let prs_data = prs.into_data().convert::<f32>().to_vec::<f32>().unwrap();
 
                 use rand::distributions::Distribution;
                 let dist = rand::distributions::WeightedIndex::new(&prs_data)?;
@@ -315,7 +320,11 @@ async fn handle_completions_inner(
             if req_logprobs.is_some() {
                 let log_probs = log_softmax(last_token_logits.reshape([1, vocab_size as i32]), 1)
                     .reshape([vocab_size as i32]);
-                let log_probs_data = log_probs.into_data().to_vec::<f32>().unwrap();
+                let log_probs_data = log_probs
+                    .into_data()
+                    .convert::<f32>()
+                    .to_vec::<f32>()
+                    .unwrap();
                 out_tokens.push(tokenizer.decode(&[next_token_id], true).unwrap_or_default());
                 out_token_logprobs.push(log_probs_data[next_token_id as usize] as f64);
                 out_top_logprobs.push(std::collections::HashMap::new());
@@ -342,7 +351,11 @@ async fn handle_completions_inner(
             let logits = model.0.forward(input);
             let logits = logits.squeeze::<2>();
             let log_probs = log_softmax(logits, 1);
-            let log_probs_vec = log_probs.into_data().to_vec::<f32>().unwrap();
+            let log_probs_vec = log_probs
+                .into_data()
+                .convert::<f32>()
+                .to_vec::<f32>()
+                .unwrap();
             let vocab_size = state.config.vocab_size;
 
             for j in 0..tokens.len() {
@@ -398,10 +411,10 @@ async fn run_simple_eval(
     let hellaswag_file = "hellaswag_val.jsonl";
 
     if !Path::new(hellaswag_file).exists() {
-        println!("Downloading HellaSwag validation dataset...");
+        log::info!("Downloading HellaSwag validation dataset...");
         let response = reqwest::blocking::get(hellaswag_url)?.text()?;
         std::fs::write(hellaswag_file, response)?;
-        println!("Download complete.");
+        log::info!("Download complete.");
     }
 
     let file = File::open(hellaswag_file)?;
@@ -419,7 +432,7 @@ async fn run_simple_eval(
     let mut wikihow_correct = 0;
     let mut wikihow_total = 0;
 
-    println!("Starting evaluation...");
+    log::info!("Starting evaluation...");
 
     for line in reader.lines() {
         let line = line?;
@@ -495,7 +508,11 @@ async fn run_simple_eval(
 
         let logits = model.forward(input);
         let log_probs = log_softmax(logits, 2);
-        let log_probs_vec = log_probs.into_data().to_vec::<f32>().unwrap();
+        let log_probs_vec = log_probs
+            .into_data()
+            .convert::<f32>()
+            .to_vec::<f32>()
+            .unwrap();
 
         let vocab_size = config.vocab_size;
 
@@ -571,17 +588,19 @@ async fn run_simple_eval(
         }
     }
 
-    println!("\n\n--- HellaSwag Category Breakdown ---");
-    println!(
+    log::info!("\n\n--- HellaSwag Category Breakdown ---");
+    log::info!(
         "{:<35} | {:<10} | {:<10}",
-        "Category", "Accuracy", "Samples"
+        "Category",
+        "Accuracy",
+        "Samples"
     );
-    println!("{:-<35}-+-{:-<10}-+-{:-<10}-", "", "", "");
+    log::info!("{:-<35}-+-{:-<10}-+-{:-<10}-", "", "", "");
 
     let print_row = |name: &str, c: usize, t: usize| {
         if t > 0 {
             let acc = (c as f32 / t as f32) * 100.0;
-            println!("{:<35} | {:>9.2}% | {:>9}", name, acc, t);
+            log::info!("{:<35} | {:>9.2}% | {:>9}", name, acc, t);
         }
     };
 
@@ -589,10 +608,10 @@ async fn run_simple_eval(
     print_row("Zero-shot Category", zeroshot_correct, zeroshot_total);
     print_row("ActivityNet Format", activitynet_correct, activitynet_total);
     print_row("WikiHow Format", wikihow_correct, wikihow_total);
-    println!("{:-<35}-+-{:-<10}-+-{:-<10}-", "", "", "");
+    log::info!("{:-<35}-+-{:-<10}-+-{:-<10}-", "", "", "");
 
     let final_acc = (correct as f32 / total as f32) * 100.0;
-    println!("\nFinal HellaSwag Accuracy: {:.2}%", final_acc);
+    log::info!("\nFinal HellaSwag Accuracy: {:.2}%", final_acc);
 
     Ok(())
 }

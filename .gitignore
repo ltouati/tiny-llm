@@ -13,3 +13,4 @@ target/
 *.txt
 runs/*
 checkpoints/*
+checkpoints_burn/*

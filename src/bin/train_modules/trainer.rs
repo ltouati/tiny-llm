@@ -7,16 +7,27 @@ use burn::lr_scheduler::{
     cosine::CosineAnnealingLrSchedulerConfig,
     linear::LinearLrSchedulerConfig,
 };
+use burn::module::AutodiffModule;
 use burn::optim::AdamWConfig;
 use burn::prelude::*;
-use burn::record::CompactRecorder;
+use burn::record::{CompactRecorder, Recorder};
 use burn::tensor::backend::AutodiffBackend;
+use burn::train::metric::store::{Aggregate, Direction, Split};
 use burn::train::metric::{LearningRateMetric, LossMetric};
 use burn::train::{
-    ClassificationOutput, InferenceStep, Learner, SupervisedTraining, TrainOutput, TrainStep,
+    ClassificationOutput, InferenceStep, Learner, MetricEarlyStoppingStrategy, StoppingCondition,
+    SupervisedTraining, TrainOutput, TrainStep,
 };
+use burn_store::{ModuleSnapshot, SafetensorsStore};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::OnceLock;
 use tiny_llm::config::TinyLLMConfig;
 use tiny_llm::model::TinyLLM;
+
+static GLOBAL_STEP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static STEPS_PER_5_PERCENT: AtomicUsize = AtomicUsize::new(0);
+static LAST_BEST_MODIFIED: AtomicU64 = AtomicU64::new(0);
+static CURRENT_OUTPUT_DIR: OnceLock<String> = OnceLock::new();
 
 #[derive(Clone)]
 pub struct TinyLLMBatcher<B: Backend> {
@@ -86,6 +97,83 @@ impl<B: AutodiffBackend> TrainStep for TrainableTinyLLM<B> {
             .init(&logits.device())
             .forward(logits.clone(), targets.clone());
 
+        let current_step = GLOBAL_STEP_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
+        let threshold = STEPS_PER_5_PERCENT.load(Ordering::SeqCst);
+
+        if threshold > 0 && current_step % threshold == 0 {
+            if let Some(output_dir) = CURRENT_OUTPUT_DIR.get() {
+                let model_valid = self.model.valid(); // Extracts away from Autodiff bounds cleanly
+                let path = format!("{}/safetensor_step_{}", output_dir, current_step);
+                if std::fs::create_dir_all(&path).is_ok() {
+                    let mut store =
+                        SafetensorsStore::from_file(format!("{}/model.safetensors", path));
+                    if model_valid.save_into(&mut store).is_ok() {
+                        log::info!(
+                            "Successfully saved mid-epoch 5% checkpoint at step {}",
+                            current_step
+                        );
+
+                        // Storage bounds check: Retain only 3 checks natively
+                        if let Ok(entries) = std::fs::read_dir(output_dir) {
+                            let mut dirs: Vec<_> = entries
+                                .filter_map(|e| e.ok())
+                                .filter(|e| {
+                                    e.path().is_dir()
+                                        && e.file_name()
+                                            .to_string_lossy()
+                                            .starts_with("safetensor_step_")
+                                })
+                                .collect();
+
+                            dirs.sort_by_key(|e| {
+                                e.metadata()
+                                    .and_then(|m| m.modified())
+                                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+                            });
+
+                            while dirs.len() > 3 {
+                                let dir_to_remove = dirs.remove(0);
+                                let _ = std::fs::remove_dir_all(dir_to_remove.path());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- NATIVE SAFETENSORS "BEST MODEL" HOOK ---
+        // Light footprint filesystem check to discover Burn's Metric Validation drops dynamically
+        if current_step % 20 == 0 {
+            if let Some(output_dir) = CURRENT_OUTPUT_DIR.get() {
+                let best_path = format!("{}/checkpoint/model-valid-loss-lowest.mpk", output_dir);
+                if let Ok(metadata) = std::fs::metadata(&best_path) {
+                    if let Ok(modified) = metadata.modified() {
+                        let modified_secs = modified
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        let last = LAST_BEST_MODIFIED.load(Ordering::SeqCst);
+                        if modified_secs > last {
+                            LAST_BEST_MODIFIED.store(modified_secs, Ordering::SeqCst);
+
+                            let device = self.model.valid().devices()[0].clone();
+                            if let Ok(record) = CompactRecorder::new()
+                                .load(best_path.replace(".mpk", "").into(), &device)
+                            {
+                                let model_valid = self.model.valid().load_record(record);
+                                let mut store = SafetensorsStore::from_file(format!(
+                                    "{}/best_model.safetensors",
+                                    output_dir
+                                ));
+                                let _ = model_valid.save_into(&mut store);
+                                log::info!("New Best Model (Lowest Validation Loss) automatically mirrored to Safetensors!");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         TrainOutput::new(
             self,
             loss.backward(),
@@ -117,48 +205,50 @@ pub struct Trainer;
 
 impl Trainer {
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn train<B: AutodiffBackend>(
-        config: TinyLLMConfig,
+        model_config: TinyLLMConfig,
+        train_config: tiny_llm::config::TinyLLMTrainingConfig,
         device: B::Device,
         dataset_path: &str,
         dataset_perc: f64,
-        batch_size: usize,
-        gradient_accumulation_steps: usize,
-        max_epochs: usize,
         output_dir: &str,
     ) {
-        let dataset = TinyLLMDataset::new(dataset_path, dataset_perc, config.seq_len).unwrap();
+        let dataset =
+            TinyLLMDataset::new(dataset_path, dataset_perc, model_config.seq_len).unwrap();
         let batcher = TinyLLMBatcher::<B> {
             device: device.clone(),
         };
 
         let dataloader_train = DataLoaderBuilder::new(batcher)
-            .batch_size(batch_size)
+            .batch_size(train_config.batch_size)
             .shuffle(42)
-            .num_workers(4)
+            .num_workers(train_config.num_workers)
             .build(dataset.clone());
 
         let valid_batcher = TinyLLMBatcher::<B::InnerBackend> {
             device: device.clone(),
         };
         let dataloader_valid = DataLoaderBuilder::new(valid_batcher)
-            .batch_size(batch_size)
-            .num_workers(4)
+            .batch_size(train_config.batch_size)
+            .num_workers(train_config.num_workers)
             .build(dataset.clone());
 
         let optim = AdamWConfig::new()
-            .with_weight_decay(0.1)
-            .with_epsilon(1e-8)
-            .with_beta_1(0.9)
-            .with_beta_2(0.95);
+            .with_weight_decay(train_config.weight_decay)
+            .with_epsilon(train_config.adamw_epsilon)
+            .with_beta_1(train_config.adamw_beta1)
+            .with_beta_2(train_config.adamw_beta2);
 
-        let actual_global_batch_size = batch_size * gradient_accumulation_steps;
+        let actual_global_batch_size =
+            train_config.batch_size * train_config.gradient_accumulation_steps;
         let base_batch = 8.0;
-        let max_lr = 6e-4 * (actual_global_batch_size as f64 / base_batch).sqrt();
+        let max_lr = train_config.max_lr * (actual_global_batch_size as f64 / base_batch).sqrt();
         let min_lr = max_lr * 0.1;
 
-        let len_dataloader = dataset.len() / batch_size;
-        let total_steps = max_epochs * len_dataloader / gradient_accumulation_steps;
+        let len_dataloader = dataset.len() / train_config.batch_size;
+        let total_steps =
+            train_config.max_epochs * len_dataloader / train_config.gradient_accumulation_steps;
         let warmup_steps = (total_steps as f64 * 0.1) as usize;
 
         let lr_scheduler = ComposedLrSchedulerConfig::new()
@@ -168,26 +258,44 @@ impl Trainer {
             .init()
             .unwrap();
 
-        let model = TinyLLM::new(&config, &device);
+        // Initialize globals natively for the safetensors step callback hook
+        let steps_per_5_percent = (total_steps as f64 * 0.05).ceil() as usize;
+        let _ = CURRENT_OUTPUT_DIR.set(output_dir.to_string());
+        STEPS_PER_5_PERCENT.store(steps_per_5_percent, Ordering::SeqCst);
+        GLOBAL_STEP_COUNTER.store(0, Ordering::SeqCst);
+
+        let model = TinyLLM::new(&model_config, &device);
         let trainable = TrainableTinyLLM::new(model);
 
         let learner = Learner::new(trainable, optim.init(), lr_scheduler);
+
+        // Native Early Stopping implementation
+        let early_stopping = MetricEarlyStoppingStrategy::new(
+            &LossMetric::<B>::new(),
+            Aggregate::Mean,
+            Direction::Lowest,
+            Split::Valid,
+            StoppingCondition::NoImprovementSince {
+                n_epochs: train_config.early_stopping_patience,
+            },
+        );
 
         let training = SupervisedTraining::new(
             output_dir,
             dataloader_train.clone(),
             dataloader_valid.clone(),
         )
-        .grads_accumulation(gradient_accumulation_steps)
+        .grads_accumulation(train_config.gradient_accumulation_steps)
         .metric_train_numeric(LossMetric::new())
         .metric_valid_numeric(LossMetric::new())
         .metric_train_numeric(LearningRateMetric::new())
         .metric_train_numeric(crate::metrics::TokensPerSecond::new())
-        .metric_train_numeric(crate::metrics::SamplesSeen::new())
+        .metric_train_numeric(crate::metrics::SamplesSeen::new(len_dataloader))
+        .early_stopping(early_stopping)
         .with_file_checkpointer(CompactRecorder::new())
-        .num_epochs(max_epochs);
+        .num_epochs(train_config.max_epochs);
 
         let _model_trained = training.launch(learner);
-        println!("Training completed natively with Burn!");
+        log::info!("Training completed natively with Burn!");
     }
 }

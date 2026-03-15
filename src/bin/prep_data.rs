@@ -6,6 +6,7 @@ use std::io::{BufWriter, Write};
 use tokenizers::Tokenizer;
 use tokio::sync::mpsc;
 
+use burn::config::Config;
 use tiny_llm::config::TinyLLMConfig;
 
 const TARGET_TOKENS: usize = 10_000_000_000;
@@ -13,8 +14,8 @@ const OUTPUT_FILE: &str = "fineweb_edu.bin";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = TinyLLMConfig::new();
-    println!("Loaded config: seq_len = {}", config.seq_len);
+    let config = TinyLLMConfig::load("config.json").unwrap_or_else(|_| TinyLLMConfig::new());
+    log::info!("Loaded config: seq_len = {}", config.seq_len);
 
     let tokenizer = Tokenizer::from_file("tokenizer.json")
         .map_err(|e| anyhow::anyhow!(e.to_string()))
@@ -40,7 +41,7 @@ async fn main() -> Result<()> {
         {
             Ok(a) => a,
             Err(e) => {
-                println!("Failed to build hf-hub API: {}", e);
+                log::info!("Failed to build hf-hub API: {}", e);
                 return;
             }
         };
@@ -58,14 +59,14 @@ async fn main() -> Result<()> {
                     }
                 }
                 Err(e) => {
-                    println!("Failed to download shard {}: {}", shard, e);
+                    log::info!("Failed to download shard {}: {}", shard, e);
                 }
             }
         }
     });
 
     while let Some((shard, path)) = rx.recv().await {
-        println!(
+        log::info!(
             "Extracting and Tokenizing shard {} loaded from HF disk cache...",
             shard
         );
@@ -96,7 +97,7 @@ async fn main() -> Result<()> {
         }
 
         let texts_len = texts.len();
-        println!(
+        log::info!(
             "Parquet parsed {} documents. Mapped natively to exactly {} Ryzen CPUs...",
             texts_len,
             rayon::current_num_threads()
@@ -118,7 +119,7 @@ async fn main() -> Result<()> {
             })
             .collect();
 
-        println!("Tokenization complete for shard {}", shard);
+        log::info!("Tokenization complete for shard {}", shard);
 
         for doc_tokens in chunked_tokens {
             let bytes: &[u8] = bytemuck::cast_slice(&doc_tokens);
@@ -126,12 +127,12 @@ async fn main() -> Result<()> {
             total_tokens += doc_tokens.len();
 
             if total_tokens >= TARGET_TOKENS {
-                println!("Hit target of 10B tokens!");
+                log::info!("Hit target of 10B tokens!");
                 break;
             }
         }
 
-        println!(
+        log::info!(
             "Shard {} complete. Total tokens so far: {:.1}M / {:.1}M",
             shard,
             total_tokens as f64 / 1_000_000.0,
@@ -144,7 +145,7 @@ async fn main() -> Result<()> {
     }
 
     downloader.abort();
-    println!("Done! Saved {} tokens to {}.", total_tokens, OUTPUT_FILE);
+    log::info!("Done! Saved {} tokens to {}.", total_tokens, OUTPUT_FILE);
 
     Ok(())
 }

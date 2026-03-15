@@ -24,12 +24,12 @@ impl DeviceSetup {
                         // Because BF16 graphs are smaller, we can push the hardcap to 4.
                         batch_size = calculated_batch.clamp(1, 4);
 
-                        println!("NVML dynamically sized Target Batch to {} based on {} MB capacity ({} MB total VRAM | {} MB free VRAM detected) 🚀", batch_size, available_mb_for_batches, total_mb, free_mb);
+                        log::info!("NVML dynamically sized Target Batch to {} based on {} MB capacity ({} MB total VRAM | {} MB free VRAM detected) 🚀", batch_size, available_mb_for_batches, total_mb, free_mb);
                     }
                 }
             }
         } else {
-            println!("NVML initialization failed; using fallback Batch Size of 2 on CUDA.");
+            log::info!("NVML initialization failed; using fallback Batch Size of 2 on CUDA.");
             batch_size = 2;
         }
 

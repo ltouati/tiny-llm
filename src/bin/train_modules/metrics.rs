@@ -110,13 +110,15 @@ impl<B: Backend> Adaptor<SamplesSeenInput> for ClassificationOutput<B> {
 pub struct SamplesSeen {
     name: Arc<String>,
     seen: usize,
+    total_batches: usize,
 }
 
 impl SamplesSeen {
-    pub fn new() -> Self {
+    pub fn new(total_batches: usize) -> Self {
         Self {
-            name: Arc::new("Batches Seen".to_string()),
+            name: Arc::new("Epoch Progress".to_string()),
             seen: 0,
+            total_batches,
         }
     }
 }
@@ -130,7 +132,7 @@ impl Metric for SamplesSeen {
 
     fn attributes(&self) -> MetricAttributes {
         NumericAttributes {
-            unit: Some("batches".to_string()),
+            unit: Some("%".to_string()),
             higher_is_better: true,
         }
         .into()
@@ -138,8 +140,9 @@ impl Metric for SamplesSeen {
 
     fn update(&mut self, item: &Self::Input, _metadata: &MetricMetadata) -> SerializedEntry {
         self.seen += item.num_batches;
-        let formatted = format!("{}", self.seen);
-        let serialized = format!("{}", self.seen);
+        let p = (self.seen as f64 / self.total_batches as f64) * 100.0;
+        let formatted = format!("{:.1}", p);
+        let serialized = format!("{}", p);
         SerializedEntry::new(formatted, serialized)
     }
 
@@ -150,10 +153,10 @@ impl Metric for SamplesSeen {
 
 impl Numeric for SamplesSeen {
     fn value(&self) -> NumericEntry {
-        NumericEntry::Value(self.seen as f64)
+        NumericEntry::Value((self.seen as f64 / self.total_batches as f64) * 100.0)
     }
 
     fn running_value(&self) -> NumericEntry {
-        NumericEntry::Value(self.seen as f64)
+        NumericEntry::Value((self.seen as f64 / self.total_batches as f64) * 100.0)
     }
 }

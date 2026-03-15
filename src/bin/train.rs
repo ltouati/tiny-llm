@@ -1,6 +1,7 @@
 use anyhow::Result;
 use burn::backend::cuda::CudaDevice;
-use tiny_llm::config::TinyLLMConfig;
+use burn::config::Config;
+use tiny_llm::config::{TinyLLMConfig, TinyLLMTrainingConfig};
 
 #[path = "train_modules/dataset.rs"]
 mod dataset;
@@ -22,11 +23,13 @@ type MyAutodiffBackend = Autodiff<MyBackend>;
 
 fn main() -> Result<()> {
     let device = CudaDevice::default();
-    println!("Training natively using Burn CUDA backend on: {:?}", device);
+    log::info!("Training natively using Burn CUDA backend on: {:?}", device);
 
     // Initializing Burn's built-in derived Config natively
-    let config = TinyLLMConfig::new();
-    println!("Burn Configuration Initialized!");
+    let config = TinyLLMConfig::load("config.json").unwrap_or_else(|_| TinyLLMConfig::new());
+    let mut train_config =
+        TinyLLMTrainingConfig::load("config.json").unwrap_or_else(|_| TinyLLMTrainingConfig::new());
+    log::info!("Burn Configuration Loaded from config.json!");
 
     let mut dataset_percentage = 100.0;
     let mut output_dir_base = "checkpoints_burn".to_string();
@@ -48,23 +51,26 @@ fn main() -> Result<()> {
 
     let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
     let output_dir = format!("{}/{}", output_dir_base, timestamp);
-    println!("Burn Configured output directory: {}", output_dir);
+    log::info!("Burn Configured output directory: {}", output_dir);
 
     let auto_batch_size = DeviceSetup::calculate_batch_size(&device);
     let auto_gradient_accumulation = (64 / auto_batch_size).max(1);
-    println!(
+
+    // Inject auto-scaling values directly into the derived config struct
+    train_config.batch_size = auto_batch_size;
+    train_config.gradient_accumulation_steps = auto_gradient_accumulation;
+
+    log::info!(
         "NVML configured Gradient Accumulation tightly to {} to reach 64 macro-batch equivalence.",
         auto_gradient_accumulation
     );
 
     Trainer::train::<MyAutodiffBackend>(
         config,
+        train_config,
         device,
         "fineweb_edu.bin",
         dataset_percentage,
-        auto_batch_size,
-        auto_gradient_accumulation,
-        10, // Max epochs
         &output_dir,
     );
 

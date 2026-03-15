@@ -27,6 +27,9 @@ Ensure you have the Rust toolchain and the NVIDIA CUDA Toolkit (v12+) installed.
 The dynamic training loop automatically utilizes `DataLoaderBuilder` over memory mapped files natively, evaluating metrics live explicitly via the `burn::train::Learner` struct.
 
 **New Training Features:**
+*   **Centralized Configuration**: All hyperparameters (e.g., `batch_size`, `max_epochs`, `weight_decay`, `learning_rate`) statically execute via Burn's `Config` macro deserialization loaded continuously via `config.json`.
+*   **Mid-Epoch Safetensors Checkpointing**: Actively tracks step bounds securely natively writing `store.safetensors` model weights identically every 5% bounds directly to `checkpoints_burn`. Supports graceful memory cleanup capping retention to the 3 latest snapshots.
+*   **Metric Early Stopping**: Triggers the `MetricEarlyStoppingStrategy` observing `validation_loss` to effortlessly halt training epochs natively whenever metric evaluations natively plateau.
 *   **Custom Metrics**: Native integration of `TokensPerSecond` and `SamplesSeen` (Batch Tracker) tracking custom pipeline throughput.
 *   **BF16 Precision & Fused Operations**: Native graphs automatically compile and execute wrapped natively under `burn_fusion` using `Cuda<half::bf16, i32>` precision, inherently slashing VRAM bounds natively.
 *   **Learning Rate Scheduler**: Incorporates `burn::lr_scheduler::composed::ComposedLrScheduler` multiplying native `Linear` warmup sweeps cleanly against `CosineAnnealing` bounds dynamically throughout training iterations.
@@ -37,7 +40,7 @@ cargo run --release --bin train -- --dataset-percentage 100
 ```
 
 ### 2. Text Generation
-Interact with the language model using stochastic Temperature Sampling natively across `generate.rs`. It explicitly scans for the highest `.mpk` `CompactRecorder` serializations in `checkpoints` directory to leverage pre-trained Burn graph dimensions.
+Interact with the language model using stochastic Temperature Sampling natively across `generate.rs`. It explicitly recursively scans runtime structures in `checkpoints_burn` for the deepest temporal `.safetensors` iteration. It securely remaps graph nodes utilizing `burn-store::SafetensorsStore` with native BF16->F32 parameter upcasting natively.
 
 ```bash
 cargo run --release --bin generate "The Apollo 11 moon landing was "
