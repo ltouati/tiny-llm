@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use burn::prelude::*;
 use burn::tensor::backend::Backend;
 use burn::train::metric::{
     Adaptor, Metric, MetricAttributes, MetricMetadata, MetricName, Numeric, NumericAttributes,
@@ -158,5 +159,84 @@ impl Numeric for SamplesSeen {
 
     fn running_value(&self) -> NumericEntry {
         NumericEntry::Value((self.seen as f64 / self.total_batches as f64) * 100.0)
+    }
+}
+
+/// Input for EmaLoss metric
+#[derive(Clone)]
+pub struct EmaLossInput {
+    pub loss: f64,
+}
+
+impl<B: Backend> Adaptor<EmaLossInput> for ClassificationOutput<B> {
+    fn adapt(&self) -> EmaLossInput {
+        EmaLossInput {
+            loss: self.loss.clone().into_scalar().to_f64(),
+        }
+    }
+}
+
+/// A Smoothed Loss metric using EMA.
+#[derive(Clone)]
+pub struct EmaLoss {
+    name: Arc<String>,
+    ema: f64,
+    alpha: f64,
+    initial: bool,
+}
+
+impl EmaLoss {
+    pub fn new(alpha: f64) -> Self {
+        Self {
+            name: Arc::new("EMA_Loss".to_string()),
+            ema: 0.0,
+            alpha,
+            initial: true,
+        }
+    }
+}
+
+impl Metric for EmaLoss {
+    type Input = EmaLossInput;
+
+    fn name(&self) -> MetricName {
+        self.name.clone()
+    }
+
+    fn attributes(&self) -> MetricAttributes {
+        NumericAttributes {
+            unit: None,
+            higher_is_better: false,
+        }
+        .into()
+    }
+
+    fn update(&mut self, input: &Self::Input, _metadata: &MetricMetadata) -> SerializedEntry {
+        let loss = input.loss;
+        if self.initial {
+            self.ema = loss;
+            self.initial = false;
+        } else {
+            self.ema = self.alpha * loss + (1.0 - self.alpha) * self.ema;
+        }
+
+        let formatted = format!("{:.4}", self.ema);
+        let serialized = format!("{}", self.ema);
+        SerializedEntry::new(formatted, serialized)
+    }
+
+    fn clear(&mut self) {
+        self.ema = 0.0;
+        self.initial = true;
+    }
+}
+
+impl Numeric for EmaLoss {
+    fn value(&self) -> NumericEntry {
+        NumericEntry::Value(self.ema)
+    }
+
+    fn running_value(&self) -> NumericEntry {
+        NumericEntry::Value(self.ema)
     }
 }

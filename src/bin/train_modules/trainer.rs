@@ -2,6 +2,7 @@ use crate::dataset::{TextItem, TinyLLMDataset};
 use burn::data::dataloader::batcher::Batcher;
 use burn::data::dataloader::DataLoaderBuilder;
 use burn::data::dataset::Dataset;
+use burn::grad_clipping::GradientClippingConfig;
 use burn::lr_scheduler::{
     composed::{ComposedLrSchedulerConfig, SchedulerReduction},
     cosine::CosineAnnealingLrSchedulerConfig,
@@ -249,9 +250,13 @@ impl Trainer {
             .with_weight_decay(train_config.weight_decay)
             .with_epsilon(train_config.adamw_epsilon)
             .with_beta_1(train_config.adamw_beta1)
-            .with_beta_2(train_config.adamw_beta2);
+            .with_beta_2(train_config.adamw_beta2)
+            .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)));
 
-        let max_lr = train_config.max_lr;
+        let actual_global_batch_size =
+            train_config.batch_size * train_config.gradient_accumulation_steps;
+        let base_batch = 8.0;
+        let max_lr = train_config.max_lr * (actual_global_batch_size as f64 / base_batch).sqrt();
         let min_lr = max_lr * 0.1;
 
         let len_dataloader = dataset.len() / train_config.batch_size;
@@ -306,6 +311,7 @@ impl Trainer {
         .metric_train_numeric(LearningRateMetric::new())
         .metric_train_numeric(crate::metrics::TokensPerSecond::new())
         .metric_train_numeric(crate::metrics::SamplesSeen::new(len_dataloader))
+        .metric_train_numeric(crate::metrics::EmaLoss::new(0.98))
         .early_stopping(early_stopping)
         .with_file_checkpointer(CompactRecorder::new())
         .num_epochs(train_config.max_epochs);
