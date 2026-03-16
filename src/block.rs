@@ -16,16 +16,38 @@ pub struct Block<B: Backend> {
 
 impl<B: Backend> Block<B> {
     pub fn new(config: &TinyLLMConfig, device: &B::Device) -> Self {
+        let std = 0.02;
+        let residual_std = std / (2.0 * config.num_layers as f64).sqrt();
+
+        let mlp_fc1 = LinearConfig::new(config.hidden_dim, config.ffn_dim)
+            .with_bias(false)
+            .init(device)
+            .load_record(burn::nn::LinearRecord {
+                weight: burn::module::Param::from_tensor(burn::tensor::Tensor::random(
+                    [config.hidden_dim, config.ffn_dim],
+                    burn::tensor::Distribution::Normal(0.0, std),
+                    device,
+                )),
+                bias: None,
+            });
+        let mlp_fc2 = LinearConfig::new(config.ffn_dim, config.hidden_dim)
+            .with_bias(false)
+            .init(device)
+            .load_record(burn::nn::LinearRecord {
+                weight: burn::module::Param::from_tensor(burn::tensor::Tensor::random(
+                    [config.ffn_dim, config.hidden_dim],
+                    burn::tensor::Distribution::Normal(0.0, residual_std),
+                    device,
+                )),
+                bias: None,
+            });
+
         Self {
             ln_1: RMSNormConfig::new(config.hidden_dim).init::<B>(device),
             attn: CausalSelfAttention::new(config, device),
             ln_2: RMSNormConfig::new(config.hidden_dim).init::<B>(device),
-            mlp_fc1: LinearConfig::new(config.hidden_dim, config.ffn_dim)
-                .with_bias(false)
-                .init(device),
-            mlp_fc2: LinearConfig::new(config.ffn_dim, config.hidden_dim)
-                .with_bias(false)
-                .init(device),
+            mlp_fc1,
+            mlp_fc2,
         }
     }
 

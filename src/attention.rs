@@ -16,19 +16,59 @@ pub struct CausalSelfAttention<B: Backend> {
 impl<B: Backend> CausalSelfAttention<B> {
     pub fn new(config: &TinyLLMConfig, device: &B::Device) -> Self {
         let head_dim = config.hidden_dim / config.num_heads;
+        let std = 0.02;
+        let residual_std = std / (2.0 * config.num_layers as f64).sqrt();
+
+        let q_proj = LinearConfig::new(config.hidden_dim, config.hidden_dim)
+            .with_bias(false)
+            .init(device)
+            .load_record(burn::nn::LinearRecord {
+                weight: burn::module::Param::from_tensor(burn::tensor::Tensor::random(
+                    [config.hidden_dim, config.hidden_dim],
+                    burn::tensor::Distribution::Normal(0.0, std),
+                    device,
+                )),
+                bias: None,
+            });
+        let k_proj = LinearConfig::new(config.hidden_dim, config.num_kv_heads * head_dim)
+            .with_bias(false)
+            .init(device)
+            .load_record(burn::nn::LinearRecord {
+                weight: burn::module::Param::from_tensor(burn::tensor::Tensor::random(
+                    [config.hidden_dim, config.num_kv_heads * head_dim],
+                    burn::tensor::Distribution::Normal(0.0, std),
+                    device,
+                )),
+                bias: None,
+            });
+        let v_proj = LinearConfig::new(config.hidden_dim, config.num_kv_heads * head_dim)
+            .with_bias(false)
+            .init(device)
+            .load_record(burn::nn::LinearRecord {
+                weight: burn::module::Param::from_tensor(burn::tensor::Tensor::random(
+                    [config.hidden_dim, config.num_kv_heads * head_dim],
+                    burn::tensor::Distribution::Normal(0.0, std),
+                    device,
+                )),
+                bias: None,
+            });
+        let out_proj = LinearConfig::new(config.hidden_dim, config.hidden_dim)
+            .with_bias(false)
+            .init(device)
+            .load_record(burn::nn::LinearRecord {
+                weight: burn::module::Param::from_tensor(burn::tensor::Tensor::random(
+                    [config.hidden_dim, config.hidden_dim],
+                    burn::tensor::Distribution::Normal(0.0, residual_std),
+                    device,
+                )),
+                bias: None,
+            });
+
         Self {
-            q_proj: LinearConfig::new(config.hidden_dim, config.hidden_dim)
-                .with_bias(false)
-                .init(device),
-            k_proj: LinearConfig::new(config.hidden_dim, config.num_kv_heads * head_dim)
-                .with_bias(false)
-                .init(device),
-            v_proj: LinearConfig::new(config.hidden_dim, config.num_kv_heads * head_dim)
-                .with_bias(false)
-                .init(device),
-            out_proj: LinearConfig::new(config.hidden_dim, config.hidden_dim)
-                .with_bias(false)
-                .init(device),
+            q_proj,
+            k_proj,
+            v_proj,
+            out_proj,
             num_heads: config.num_heads,
             num_kv_heads: config.num_kv_heads,
             head_dim,

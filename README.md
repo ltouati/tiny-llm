@@ -16,6 +16,9 @@ A minimalist, high-performance GPT-2 style language model built entirely in Rust
 *   **Optimizer Subsystem**: Integrates `burn::optim::AdamWConfig` for clean iteration looping, scaling and modifying gradients in-place explicitly via Burn's `Autodiff` execution node traces.
 *   **RMSNorm Substitution**: Swapped all standard `LayerNorm` instances with a custom `RMSNorm` implementation, reducing computational overhead by shifting to a scale-only normalization scheme without mean-centering.
 *   **Bias Elimination**: Structurally swapped `Linear` blocks strictly into `linear_no_bias` configurations natively dropping unnecessary broadcast operations globally for an identically matched LLaMA geometry.
+*   **Weight Tying & Scaling**: 
+    - Fully integrated **Weight Tying**, sharing parameters between the Embedding layer and the Language Model Head. This reduces total parameter count by over 15% and significantly lowers VRAM requirements.
+    - Added `medium()` and `large()` configuration presets for easy experimentation and scaling.
 *   **Modular Design**: The monolithic codebase is cleanly packaged into isolated domains (`attention`, `block`, `trainer`, `dataset`) decoupling the graph definition from the complex memory/training orchestrators like `burn::train::Learner`.
 
 ---

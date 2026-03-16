@@ -109,11 +109,11 @@ async fn main() -> Result<()> {
                 let mut result = None;
                 if let Ok(encoding) = tokenizer.encode(text.as_str(), false) {
                     let ids = encoding.get_ids();
-                    if ids.len() <= config.seq_len {
-                        let mut tokens = ids.to_vec();
-                        tokens.push(50256); // <|endoftext|>
-                        result = Some(tokens);
-                    }
+
+                    let mut tokens = Vec::with_capacity(ids.len() + 1);
+                    tokens.extend_from_slice(ids);
+                    tokens.push(50256); // Add EOS <|endoftext|>
+                    result = Some(tokens);
                 }
                 result
             })

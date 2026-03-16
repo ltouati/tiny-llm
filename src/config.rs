@@ -16,11 +16,39 @@ pub struct TinyLLMConfig {
     pub num_kv_heads: usize,
     #[config(default = 3072)]
     pub ffn_dim: usize,
+    #[config(default = true)]
+    pub tied_weights: bool,
 }
 
 impl TinyLLMConfig {
     pub fn head_dim(&self) -> usize {
         self.hidden_dim / self.num_heads
+    }
+
+    pub fn medium() -> Self {
+        Self {
+            vocab_size: 50257,
+            hidden_dim: 1024,
+            seq_len: 1024,
+            num_layers: 24,
+            num_heads: 16,
+            num_kv_heads: 8,
+            ffn_dim: 4096,
+            tied_weights: true,
+        }
+    }
+
+    pub fn large() -> Self {
+        Self {
+            vocab_size: 50257,
+            hidden_dim: 1280,
+            seq_len: 1024,
+            num_layers: 36,
+            num_heads: 20,
+            num_kv_heads: 10,
+            ffn_dim: 5120,
+            tied_weights: true,
+        }
     }
 }
 

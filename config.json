@@ -12,6 +12,7 @@
   "batch_size": 2,
   "gradient_accumulation_steps": 32,
   "max_lr": 0.0006,
+  "tied_weights": true,
   "weight_decay": 0.1,
   "adamw_beta1": 0.9,
   "adamw_beta2": 0.95,

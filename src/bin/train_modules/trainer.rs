@@ -251,10 +251,7 @@ impl Trainer {
             .with_beta_1(train_config.adamw_beta1)
             .with_beta_2(train_config.adamw_beta2);
 
-        let actual_global_batch_size =
-            train_config.batch_size * train_config.gradient_accumulation_steps;
-        let base_batch = 8.0;
-        let max_lr = train_config.max_lr * (actual_global_batch_size as f64 / base_batch).sqrt();
+        let max_lr = train_config.max_lr;
         let min_lr = max_lr * 0.1;
 
         let len_dataloader = dataset.len() / train_config.batch_size;
