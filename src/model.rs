@@ -1,13 +1,14 @@
 use crate::block::Block;
 use crate::config::TinyLLMConfig;
-use burn::nn::{Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig};
+use crate::rmsnorm::{RMSNorm, RMSNormConfig};
+use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
 use burn::prelude::*;
 
 #[derive(Module, Debug)]
 pub struct TinyLLM<B: Backend> {
     wte: Embedding<B>,
     blocks: Vec<Block<B>>,
-    ln_f: LayerNorm<B>,
+    ln_f: RMSNorm<B>,
     lm_head: Linear<B>,
 }
 
@@ -20,7 +21,7 @@ impl<B: Backend> TinyLLM<B> {
         Self {
             wte: EmbeddingConfig::new(config.vocab_size, config.hidden_dim).init(device),
             blocks,
-            ln_f: LayerNormConfig::new(config.hidden_dim).init(device),
+            ln_f: RMSNormConfig::new(config.hidden_dim).init::<B>(device),
             lm_head: LinearConfig::new(config.hidden_dim, config.vocab_size)
                 .with_bias(false)
                 .init(device),

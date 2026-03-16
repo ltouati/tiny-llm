@@ -1,14 +1,15 @@
 use crate::attention::CausalSelfAttention;
 use crate::config::TinyLLMConfig;
-use burn::nn::{LayerNorm, LayerNormConfig, Linear, LinearConfig};
+use crate::rmsnorm::{RMSNorm, RMSNormConfig};
+use burn::nn::{Linear, LinearConfig};
 use burn::prelude::*;
 use burn::tensor::activation::gelu;
 
 #[derive(Module, Debug)]
 pub struct Block<B: Backend> {
-    ln_1: LayerNorm<B>,
+    ln_1: RMSNorm<B>,
     attn: CausalSelfAttention<B>,
-    ln_2: LayerNorm<B>,
+    ln_2: RMSNorm<B>,
     mlp_fc1: Linear<B>,
     mlp_fc2: Linear<B>,
 }
@@ -16,9 +17,9 @@ pub struct Block<B: Backend> {
 impl<B: Backend> Block<B> {
     pub fn new(config: &TinyLLMConfig, device: &B::Device) -> Self {
         Self {
-            ln_1: LayerNormConfig::new(config.hidden_dim).init(device),
+            ln_1: RMSNormConfig::new(config.hidden_dim).init::<B>(device),
             attn: CausalSelfAttention::new(config, device),
-            ln_2: LayerNormConfig::new(config.hidden_dim).init(device),
+            ln_2: RMSNormConfig::new(config.hidden_dim).init::<B>(device),
             mlp_fc1: LinearConfig::new(config.hidden_dim, config.ffn_dim)
                 .with_bias(false)
                 .init(device),

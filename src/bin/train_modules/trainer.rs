@@ -28,6 +28,7 @@ static GLOBAL_STEP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static STEPS_PER_5_PERCENT: AtomicUsize = AtomicUsize::new(0);
 static LAST_BEST_MODIFIED: AtomicU64 = AtomicU64::new(0);
 static CURRENT_OUTPUT_DIR: OnceLock<String> = OnceLock::new();
+static START_TIME_SECS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 pub struct TinyLLMBatcher<B: Backend> {
@@ -42,29 +43,32 @@ pub struct TextBatch<B: Backend> {
 
 impl<B: Backend> Batcher<B, TextItem, TextBatch<B>> for TinyLLMBatcher<B> {
     fn batch(&self, items: Vec<TextItem>, _device: &B::Device) -> TextBatch<B> {
-        let mut inputs_list = Vec::with_capacity(items.len());
-        let mut targets_list = Vec::with_capacity(items.len());
+        let batch_size = items.len();
+        if batch_size == 0 {
+            return TextBatch {
+                inputs: Tensor::empty([0, 0], &self.device),
+                targets: Tensor::empty([0, 0], &self.device),
+            };
+        }
+
+        let seq_len = items[0].tokens.len() - 1;
+
+        let mut inputs_flat = Vec::with_capacity(batch_size * seq_len);
+        let mut targets_flat = Vec::with_capacity(batch_size * seq_len);
 
         for item in items {
             let tokens = item.tokens;
             let input = &tokens[0..tokens.len() - 1];
             let target = &tokens[1..tokens.len()];
 
-            let input_i32: Vec<i32> = input.iter().map(|&x| x as i32).collect();
-            let target_i32: Vec<i32> = target.iter().map(|&x| x as i32).collect();
-
-            inputs_list.push(Tensor::<B, 1, Int>::from_ints(
-                input_i32.as_slice(),
-                &self.device,
-            ));
-            targets_list.push(Tensor::<B, 1, Int>::from_ints(
-                target_i32.as_slice(),
-                &self.device,
-            ));
+            inputs_flat.extend(input.iter().map(|&x| x as i32));
+            targets_flat.extend(target.iter().map(|&x| x as i32));
         }
 
-        let inputs = Tensor::stack(inputs_list, 0);
-        let targets = Tensor::stack(targets_list, 0);
+        let inputs = Tensor::<B, 1, Int>::from_ints(inputs_flat.as_slice(), &self.device)
+            .reshape([batch_size, seq_len]);
+        let targets = Tensor::<B, 1, Int>::from_ints(targets_flat.as_slice(), &self.device)
+            .reshape([batch_size, seq_len]);
 
         TextBatch { inputs, targets }
     }
@@ -74,11 +78,17 @@ impl<B: Backend> Batcher<B, TextItem, TextBatch<B>> for TinyLLMBatcher<B> {
 #[derive(Module, Debug)]
 pub struct TrainableTinyLLM<B: Backend> {
     model: TinyLLM<B>,
+    loss: burn::nn::loss::CrossEntropyLoss<B>,
+    dummy_out: Tensor<B, 2>,
 }
 
 impl<B: Backend> TrainableTinyLLM<B> {
-    pub fn new(model: TinyLLM<B>) -> Self {
-        Self { model }
+    pub fn new(model: TinyLLM<B>, device: &B::Device) -> Self {
+        Self {
+            model,
+            loss: burn::nn::loss::CrossEntropyLossConfig::new().init(device),
+            dummy_out: Tensor::empty([1, 1], device),
+        }
     }
 }
 
@@ -93,13 +103,13 @@ impl<B: AutodiffBackend> TrainStep for TrainableTinyLLM<B> {
         let logits = logits.reshape([batch_size * seq_len, vocab_size]);
         let targets = batch.targets.reshape([batch_size * seq_len]);
 
-        let loss = burn::nn::loss::CrossEntropyLossConfig::new()
-            .init(&logits.device())
-            .forward(logits.clone(), targets.clone());
+        let loss = self.loss.forward(logits.clone(), targets.clone());
 
         let current_step = GLOBAL_STEP_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
+
         let threshold = STEPS_PER_5_PERCENT.load(Ordering::SeqCst);
 
+        #[allow(clippy::manual_is_multiple_of)]
         if threshold > 0 && current_step % threshold == 0 {
             if let Some(output_dir) = CURRENT_OUTPUT_DIR.get() {
                 let model_valid = self.model.valid(); // Extracts away from Autodiff bounds cleanly
@@ -143,6 +153,7 @@ impl<B: AutodiffBackend> TrainStep for TrainableTinyLLM<B> {
 
         // --- NATIVE SAFETENSORS "BEST MODEL" HOOK ---
         // Light footprint filesystem check to discover Burn's Metric Validation drops dynamically
+        #[allow(clippy::manual_is_multiple_of)]
         if current_step % 20 == 0 {
             if let Some(output_dir) = CURRENT_OUTPUT_DIR.get() {
                 let best_path = format!("{}/checkpoint/model-valid-loss-lowest.mpk", output_dir);
@@ -174,10 +185,12 @@ impl<B: AutodiffBackend> TrainStep for TrainableTinyLLM<B> {
             }
         }
 
+        // To prevent Burn's internal dashboard or metric channels from accidentally syncing the dense matrix D2H,
+        // we pass an empty tensor into ClassificationOutput since we don't calculate Accuracy metric anyway.
         TrainOutput::new(
             self,
             loss.backward(),
-            ClassificationOutput::new(loss, logits, targets),
+            ClassificationOutput::new(loss, self.dummy_out.clone(), targets),
         )
     }
 }
@@ -193,11 +206,9 @@ impl<B: Backend> InferenceStep for TrainableTinyLLM<B> {
         let logits = logits.reshape([batch_size * seq_len, vocab_size]);
         let targets = batch.targets.reshape([batch_size * seq_len]);
 
-        let loss = burn::nn::loss::CrossEntropyLossConfig::new()
-            .init(&logits.device())
-            .forward(logits.clone(), targets.clone());
+        let loss = self.loss.forward(logits.clone(), targets.clone());
 
-        ClassificationOutput::new(loss, logits, targets)
+        ClassificationOutput::new(loss, self.dummy_out.clone(), targets)
     }
 }
 
@@ -263,9 +274,16 @@ impl Trainer {
         let _ = CURRENT_OUTPUT_DIR.set(output_dir.to_string());
         STEPS_PER_5_PERCENT.store(steps_per_5_percent, Ordering::SeqCst);
         GLOBAL_STEP_COUNTER.store(0, Ordering::SeqCst);
+        START_TIME_SECS.store(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            Ordering::SeqCst,
+        );
 
         let model = TinyLLM::new(&model_config, &device);
-        let trainable = TrainableTinyLLM::new(model);
+        let trainable = TrainableTinyLLM::new(model, &device);
 
         let learner = Learner::new(trainable, optim.init(), lr_scheduler);
 

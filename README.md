@@ -14,6 +14,7 @@ A minimalist, high-performance GPT-2 style language model built entirely in Rust
     *   Fully integrated generic **Rotary Positional Embeddings (RoPE)** computed deterministically inside math tensor expansions natively.
     *   Native Causal Masking integration preparing sequential sequences optimally within attention matrices.
 *   **Optimizer Subsystem**: Integrates `burn::optim::AdamWConfig` for clean iteration looping, scaling and modifying gradients in-place explicitly via Burn's `Autodiff` execution node traces.
+*   **RMSNorm Substitution**: Swapped all standard `LayerNorm` instances with a custom `RMSNorm` implementation, reducing computational overhead by shifting to a scale-only normalization scheme without mean-centering.
 *   **Bias Elimination**: Structurally swapped `Linear` blocks strictly into `linear_no_bias` configurations natively dropping unnecessary broadcast operations globally for an identically matched LLaMA geometry.
 *   **Modular Design**: The monolithic codebase is cleanly packaged into isolated domains (`attention`, `block`, `trainer`, `dataset`) decoupling the graph definition from the complex memory/training orchestrators like `burn::train::Learner`.
 
@@ -34,6 +35,7 @@ The dynamic training loop automatically utilizes `DataLoaderBuilder` over memory
 *   **BF16 Precision & Fused Operations**: Native graphs automatically compile and execute wrapped natively under `burn_fusion` using `Cuda<half::bf16, i32>` precision, inherently slashing VRAM bounds natively.
 *   **Learning Rate Scheduler**: Incorporates `burn::lr_scheduler::composed::ComposedLrScheduler` multiplying native `Linear` warmup sweeps cleanly against `CosineAnnealing` bounds dynamically throughout training iterations.
 *   **Dataset Slicing**: Dynamically slice datasets statically via parameter blocks (e.g., `--dataset-percentage 10`).
+*   **Reduced Synchronization**: Optimized `TrainStep` to bypass unnecessary tensor synchronizations (D2H) by caching the loss function and utilizing empty dummy tensors for non-critical metric checks.
 
 ```bash
 cargo run --release --bin train -- --dataset-percentage 100

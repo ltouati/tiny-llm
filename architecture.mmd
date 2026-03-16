@@ -8,7 +8,7 @@ graph TD
 
     subgraph TransformerBlock["Transformer Block (x12)"]
         direction TB
-        LN1["LayerNorm 1"]:::layer
+        LN1["RMSNorm 1"]:::layer
         
         subgraph Attention["CausalSelfAttention"]
             direction TB
@@ -38,7 +38,7 @@ graph TD
         
         Add1((+)):::tensor
         
-        LN2["LayerNorm 2"]:::layer
+        LN2["RMSNorm 2"]:::layer
         
         subgraph FFN["FeedForward Network"]
             direction TB
@@ -59,7 +59,7 @@ graph TD
     WTE --> LN1
     Add1 -.-> Add2
 
-    LNFinal["Final LayerNorm"]:::layer
+    LNFinal["Final RMSNorm"]:::layer
     Add2 --> LNFinal
 
     subgraph LMHead["Language Modeling Head"]
