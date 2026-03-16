@@ -16,13 +16,15 @@ impl DeviceSetup {
                     if free_mb > reserved_mb {
                         let available_mb_for_batches = free_mb - reserved_mb;
                         // Heuristic: Using BF16 mixed-precision halves the VRAM demand for weights/activations.
-                        // We safely bound it to ~2000 MB per batch item to maintain high memory utilization.
-                        let memory_per_batch_item_mb = 2000.0;
+                        // However, CrossEntropy expands logits to [batch_size * seq_len, vocab_size].
+                        // To prevent massive contiguous buffer allocations (>10GB) that panic the allocator, we budget safely.
+                        let memory_per_batch_item_mb = 3500.0;
                         let calculated_batch =
                             (available_mb_for_batches as f64 / memory_per_batch_item_mb) as usize;
 
-                        // We allow Burn to allocate up to the calculated boundary natively to fully saturate High-End GPUs like A100.
-                        batch_size = calculated_batch.max(1);
+                        // We clamp to 8 to absolutely guarantee we never attempt a single contiguous allocation
+                        // that exceeds `cubecl`'s fragmentation limits, while still pushing 2x the original limit.
+                        batch_size = calculated_batch.clamp(1, 8);
 
                         log::info!("NVML dynamically sized Target Batch to {} based on {} MB capacity ({} MB total VRAM | {} MB free VRAM detected) 🚀", batch_size, available_mb_for_batches, total_mb, free_mb);
                     }
